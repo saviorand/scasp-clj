@@ -1,1 +1,3 @@
 refs/
+.clj-kondo/
+.cpcache/

@@ -1,0 +1,206 @@
+(ns scasp.chs
+  "Coinductive Hypothesis Set (CHS).
+
+   The CHS tracks which goals are on the current proof path, preventing
+   infinite loops and enabling coinductive success/failure.
+
+   CHS structure:
+     {functor-str → [{:args [term…] :success? bool :nmr? bool} …]}
+
+   check-chs returns a lazy sequence of result maps:
+     {:result  :not-present | :coinductive-success
+      :var-env <updated>
+      :even-loop {:cycle [goal…] :cvars [var…]} | nil}
+
+   nil result in the seq means failure (constructive coinductive failure applied)."
+  (:require [scasp.term   :as term]
+            [scasp.vars   :as vars]
+            [scasp.unify  :as unify]))
+
+;;; ── Construction ─────────────────────────────────────────────────────────────
+
+(defn new-chs [] {})
+
+;;; ── Entry helpers ────────────────────────────────────────────────────────────
+
+(defn- make-entry [args success? nmr?]
+  {:args (vec args) :success? success? :nmr? nmr?})
+
+(defn- entries-for [functor chs]
+  (get chs functor []))
+
+;;; ── Exact match ──────────────────────────────────────────────────────────────
+
+(defn- exact-match-args?
+  "Strict check: unbound var only matches unbound var with same constraints."
+  [a1 a2 ve]
+  (cond
+    (= a1 a2) true
+
+    (and (term/is-var? a1) (term/is-var? a2))
+    (let [v1 (vars/var-value a1 ve)
+          v2 (vars/var-value a2 ve)]
+      (cond
+        (and (contains? v1 :val) (contains? v2 :val))
+        (exact-match-args? (:val v1) (:val v2) ve)
+
+        (and (not (contains? v1 :val)) (not (contains? v2 :val)))
+        (= (:constraints v1) (:constraints v2))
+
+        :else false))
+
+    (term/is-var? a1)
+    (let [v1 (vars/var-value a1 ve)]
+      (when (contains? v1 :val)
+        (exact-match-args? (:val v1) a2 ve)))
+
+    (term/is-var? a2)
+    (let [v2 (vars/var-value a2 ve)]
+      (when (contains? v2 :val)
+        (exact-match-args? a1 (:val v2) ve)))
+
+    (and (term/is-compound? a1) (term/is-compound? a2)
+         (= (:op a1) (:op a2))
+         (= (count (:args a1)) (count (:args a2))))
+    (every? true? (map #(exact-match-args? %1 %2 ve) (:args a1) (:args a2)))
+
+    :else false))
+
+(defn exact-match
+  "Find the first entry in entries whose args exactly match args under ve.
+   Returns the entry or nil."
+  [args entries ve]
+  (some (fn [e]
+          (when (and (= (count (:args e)) (count args))
+                     (every? true? (map #(exact-match-args? %1 %2 ve) args (:args e))))
+            e))
+        entries))
+
+;;; ── Add / remove entries ─────────────────────────────────────────────────────
+
+(defn add-to-chs
+  "Add an entry for functor with args. Returns [entry updated-chs]."
+  [functor args success? nmr? chs]
+  (let [e    (make-entry args success? nmr?)
+        chs' (update chs functor (fnil conj []) e)]
+    [e chs']))
+
+(defn remove-from-chs
+  "Remove a specific entry (by identity) from the CHS."
+  [entry functor chs]
+  (update chs functor (fn [es] (vec (remove #(identical? % entry) es)))))
+
+;;; ── Coinductive failure (negation in CHS) ────────────────────────────────────
+
+(defn- coinductive-failure?
+  "True if the negation of functor/args is present in CHS as an exact match."
+  [functor args ve chs]
+  (let [neg-f (term/negate-functor functor)
+        neg-entries (entries-for neg-f chs)]
+    (boolean (exact-match args neg-entries ve))))
+
+;;; ── Constructive coinductive failure ─────────────────────────────────────────
+
+(defn- dual-entries-unifying
+  "Return CHS entries for the dual of functor that unify with args."
+  [functor args ve chs]
+  (let [neg-f   (term/negate-functor functor)
+        neg-entries (entries-for neg-f chs)]
+    (filter (fn [e]
+              (when-not (exact-match args (entries-for functor chs) ve)
+                ;; Try to unify with each dual entry
+                (unify/solve-unify
+                 (term/make-compound (term/functor-name-str functor) args)
+                 (term/make-compound (term/functor-name-str neg-f) (:args e))
+                 ve false)))
+            neg-entries)))
+
+;;; ── Check call stack for loops ───────────────────────────────────────────────
+
+(defn check-negations
+  "Walk call-stack looking for an ancestor call with the same functor.
+   call-stack entries are {:goal compound :rule any}.
+   Returns {:result :positive-loop | :even-loop | :not-found
+             :cycle  [goals from stack]
+             :cvars  [variables non-ground in both calls]
+             :var-env <updated>}."
+  [functor args ve call-stack]
+  (loop [[entry & rest-stack] call-stack
+         neg-seen? false
+         cycle     []]
+    (if (nil? entry)
+      {:result :not-found :cycle [] :cvars [] :var-env ve}
+      (let [g   (:goal entry)
+            gf  (when (term/is-compound? g) (term/term-functor g))]
+        (cond
+          ;; Intervening negation (dual call on stack)
+          (and gf (term/is-dual? gf) (not= gf functor))
+          (recur rest-stack true (conj cycle g))
+
+          ;; Match found: same functor
+          (and gf (= gf functor))
+          (let [g-args (:args g)
+                ve'    (unify/solve-unify
+                        (term/make-compound (term/functor-name-str functor) args)
+                        (term/make-compound (term/functor-name-str functor) g-args)
+                        ve false)]
+            (if ve'
+              (if neg-seen?
+                ;; Even loop: coinductive success with variable substitution info
+                {:result :even-loop
+                 :cycle  (conj cycle g)
+                 :cvars  (vars/variable-intersection
+                          (term/make-compound (term/functor-name-str functor) args)
+                          g ve)
+                 :var-env ve'}
+                ;; Positive loop: fail
+                {:result :positive-loop
+                 :cycle  []
+                 :cvars  []
+                 :var-env ve})
+              ;; Doesn't unify → keep going
+              (recur rest-stack neg-seen? (conj cycle g))))
+
+          :else
+          (recur rest-stack neg-seen? (conj cycle g)))))))
+
+;;; ── Main CHS check ───────────────────────────────────────────────────────────
+
+(defn check-chs
+  "Check the CHS for functor/args.
+   Returns a lazy seq of result maps; each map has:
+     :result  – :not-present | :coinductive-success
+     :var-env – updated var-env
+     :even-loop – {:cycle [] :cvars []} or nil
+
+   An empty seq means failure."
+  [functor args ve chs call-stack]
+  (let [entries (entries-for functor chs)
+        {:keys [result cycle cvars var-env]} (check-negations functor args ve call-stack)]
+    (case result
+      :positive-loop
+      [] ; positive loop → fail
+
+      :even-loop
+      [{:result    :coinductive-success
+        :var-env   var-env
+        :even-loop {:cycle cycle :cvars cvars}}]
+
+      ;; not-found: check CHS entries
+      (cond
+        ;; coinductive success: exact match with success=true
+        (exact-match args (filter :success? entries) ve)
+        [{:result    :coinductive-success
+          :var-env   ve
+          :even-loop {:cycle [] :cvars []}}]
+
+        ;; constructive coinductive failure: negation in CHS → succeed (constrained)
+        (coinductive-failure? functor args ve chs)
+        [{:result    :coinductive-success
+          :var-env   ve
+          :even-loop {:cycle [] :cvars []}}]
+
+        :else
+        [{:result    :not-present
+          :var-env   ve
+          :even-loop nil}]))))
