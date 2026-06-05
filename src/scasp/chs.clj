@@ -79,11 +79,17 @@
 ;;; ── Add / remove entries ─────────────────────────────────────────────────────
 
 (defn add-to-chs
-  "Add an entry for functor with args. Returns [entry updated-chs]."
-  [functor args success? nmr? chs]
-  (let [e    (make-entry args success? nmr?)
-        chs' (update chs functor (fnil conj []) e)]
-    [e chs']))
+  "Add an entry for functor with args. Returns [entry updated-chs updated-ve].
+   even-loop-cvars is a collection of variable names that are loop variables
+   (from prior even-loops on this branch); their args are kept live while other
+   unbound vars are frozen (bindable? false) before storage."
+  ([functor args success? nmr? chs ve]
+   (add-to-chs functor args success? nmr? chs ve []))
+  ([functor args success? nmr? chs ve even-loop-cvars]
+   (let [[frozen-args ve'] (vars/replace-args-for-chs args even-loop-cvars ve)
+         e                 (make-entry frozen-args success? nmr?)
+         chs'              (update chs functor (fnil conj []) e)]
+     [e chs' ve'])))
 
 (defn remove-from-chs
   "Remove a specific entry (by identity) from the CHS."

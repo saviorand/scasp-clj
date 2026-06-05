@@ -222,6 +222,62 @@
         shared (set/intersection ids1 ids2)]
     (into [] (filter (fn [v] (contains? shared (get-value-id v ve)))) v1)))
 
+;;; ── Even-loop variable substitution ─────────────────────────────────────────
+
+(defn replace-vars-for-chs
+  "Walk term t, replacing variables for CHS storage.
+   Loop vars (in loop-var-ids set of value-ids) are kept as-is.
+   Other unbound vars are replaced with a fresh frozen var (bindable? false).
+   Bound vars are substituted with their value.
+   Returns [term' updated-ve mapping] where mapping is {old-name → new-name}."
+  ([t loop-var-ids ve]
+   (replace-vars-for-chs t loop-var-ids ve {}))
+  ([t loop-var-ids ve mapping]
+   (cond
+     (term/is-var? t)
+     (let [v (var-value t ve)]
+       (cond
+         ;; bound → substitute value recursively
+         (contains? v :val)
+         (let [[t' ve' m'] (replace-vars-for-chs (:val v) loop-var-ids ve mapping)]
+           [t' ve' (assoc m' t t')])
+
+         ;; loop var → keep as-is
+         (contains? loop-var-ids (get-value-id t ve))
+         [t ve (assoc mapping t t)]
+
+         ;; already seen this var → reuse same replacement
+         (contains? mapping t)
+         [(get mapping t) ve mapping]
+
+         ;; unbound non-loop → freeze with fresh var
+         :else
+         (let [[fresh ve1] (generate-unique-var t ve)
+               frozen      (assoc v :bindable? false)
+               ve2         (update-var-value fresh frozen ve1)]
+           [fresh ve2 (assoc mapping t fresh)])))
+
+     (term/is-compound? t)
+     (reduce (fn [[t-acc ve-acc m-acc] arg]
+               (let [[arg' ve' m'] (replace-vars-for-chs arg loop-var-ids ve-acc m-acc)]
+                 [(update t-acc :args conj arg') ve' m']))
+             [(assoc t :args []) ve mapping]
+             (:args t))
+
+     :else [t ve mapping])))
+
+(defn replace-args-for-chs
+  "Apply replace-vars-for-chs to each arg in args.
+   loop-var-set is a collection of variable names that are loop variables.
+   Returns [args' updated-ve]."
+  [args loop-var-set ve]
+  (let [loop-ids (into #{} (keep #(get-value-id % ve)) loop-var-set)]
+    (reduce (fn [[acc-args acc-ve acc-map] arg]
+              (let [[arg' ve' m'] (replace-vars-for-chs arg loop-ids acc-ve acc-map)]
+                [(conj acc-args arg') ve' m']))
+            [[] ve {}]
+            args)))
+
 ;;; ── Body-only variable extraction ───────────────────────────────────────────
 
 (defn body-vars

@@ -16,7 +16,12 @@
             [scasp.chs     :as chs]))
 
 ;;; Forward declarations (mutual recursion between solve functions)
-(declare solve-goal solve-goals solve-predicate expand-call expand-call2)
+(declare solve-goal solve-goals solve-goals* solve-predicate expand-call expand-call2)
+
+(defn- collect-cvars
+  "Flatten all cvars from a list of even-loop entries [{:cycle … :cvars […]} …]."
+  [even-loops]
+  (into [] (mapcat :cvars) even-loops))
 
 ;;; ── Result record helper ─────────────────────────────────────────────────────
 
@@ -175,22 +180,26 @@
 
 ;;; ── Goal dispatcher ──────────────────────────────────────────────────────────
 
-(defn solve-goals
-  "Solve a list of goals.  Returns lazy-seq of result maps."
-  [goals ve chs call-stack in-nmr? program]
+(defn- solve-goals*
+  [goals ve chs call-stack in-nmr? even-loops program]
   (if (empty? goals)
     [(mk-result ve chs :success [])]
     (lazy-seq
       (mapcat
         (fn [{ve' :var-env chs' :chs el :even-loops}]
-          (map (fn [r2]
-                 (update r2 :even-loops into el))
-               (solve-goals (rest goals) ve' chs' call-stack in-nmr? program)))
-        (solve-goal (first goals) ve chs call-stack in-nmr? program)))))
+          (let [el' (into even-loops el)]
+            (map (fn [r2] (update r2 :even-loops into el))
+                 (solve-goals* (rest goals) ve' chs' call-stack in-nmr? el' program))))
+        (solve-goal (first goals) ve chs call-stack in-nmr? even-loops program)))))
+
+(defn solve-goals
+  "Solve a list of goals.  Returns lazy-seq of result maps."
+  [goals ve chs call-stack in-nmr? program]
+  (solve-goals* goals ve chs call-stack in-nmr? [] program))
 
 (defn solve-goal
   "Dispatch a single goal to the appropriate solver."
-  [goal ve chs call-stack in-nmr? program]
+  [goal ve chs call-stack in-nmr? even-loops program]
   (cond
     ;; forall(V, G)
     (term/is-forall? goal)
@@ -205,7 +214,7 @@
 
     ;; NAF or regular predicate
     (term/is-compound? goal)
-    (solve-predicate goal ve chs call-stack in-nmr? program)
+    (solve-predicate goal ve chs call-stack in-nmr? even-loops program)
 
     :else
     (throw (ex-info "Unknown goal type" {:goal goal}))))
@@ -214,7 +223,7 @@
 
 (defn solve-predicate
   "Solve a predicate goal (positive or NAF-wrapped)."
-  [goal ve chs call-stack in-nmr? program]
+  [goal ve chs call-stack in-nmr? even-loops program]
   (let [[functor args]
         (if (term/is-naf? goal)
           (let [inner (first (:args goal))]
@@ -232,7 +241,7 @@
             [(mk-result var-env chs {:chs-success goal}
                         (if even-loop [even-loop] []))]
             :not-present
-            (expand-call effective-goal functor args var-env chs call-stack in-nmr? program)
+            (expand-call effective-goal functor args var-env chs call-stack in-nmr? even-loops program)
             []))
         (chs/check-chs functor args ve chs call-stack)))))
 
@@ -240,17 +249,18 @@
 
 (defn expand-call
   "Expand a predicate call by looking up rules and trying each."
-  [goal functor args ve chs call-stack in-nmr? program]
-  (let [[entry chs1] (chs/add-to-chs functor args false in-nmr? chs)
-        rules        (prog/defined-rules functor program)
-        new-stack    (conj call-stack {:goal goal :rule nil})]
+  [goal functor args ve chs call-stack in-nmr? even-loops program]
+  (let [cvars            (collect-cvars even-loops)
+        [entry chs1 ve1] (chs/add-to-chs functor args false in-nmr? chs ve cvars)
+        rules            (prog/defined-rules functor program)
+        new-stack        (into [{:goal goal :rule nil}] call-stack)]
     (lazy-seq
       (mapcat
         (fn [{ve2 :var-env chs2 :chs just :just el :even-loops}]
-          (let [chs3         (chs/remove-from-chs entry functor chs2)
-                [_ chs4]     (chs/add-to-chs functor args true in-nmr? chs3)]
+          (let [chs3           (chs/remove-from-chs entry functor chs2)
+                [_ chs4 _ve4]  (chs/add-to-chs functor args true in-nmr? chs3 ve2 cvars)]
             [(mk-result ve2 chs4 just el)]))
-        (expand-call2 goal rules ve chs1 new-stack in-nmr? program)))))
+        (expand-call2 goal rules ve1 chs1 new-stack in-nmr? program)))))
 
 (defn expand-call2
   "Try each rule in turn; yield results for matching rules."

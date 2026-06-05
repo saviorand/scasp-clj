@@ -82,6 +82,30 @@
     (is (= 3 (count results-no-c)))
     (is (= 0 (count results-with-c)))))
 
+;;; ── Even-loop variable substitution (Phase 12b) ─────────────────────────────
+
+(deftest even-loop-var-substitution-test
+  ;; Classic even loop with a variable:
+  ;;   p(X) :- not q(X).
+  ;;   q(X) :- not p(X).
+  ;;   color(red). color(blue).
+  ;;   ?- p(X), color(X).
+  ;;
+  ;; p(X) calls not q(X), which calls q's dual (not_q(X)), which has
+  ;; not p(X) in its body — that detects an even loop back to p(X).
+  ;; Coinductive success fires for p(X). Then color(X) binds X to each color.
+  ;; With correct var substitution, each branch gets its own frozen X in the
+  ;; CHS, so both answers (X=red, X=blue) are produced independently.
+  (let [rules [(r (c :p "X") (naf (c :q "X")))
+               (r (c :q "X") (naf (c :p "X")))
+               (r (c :color :red))
+               (r (c :color :blue))]
+        results (main/solve-all rules [(c :p "X") (c :color "X")])
+        x-vals  (set (map #(vars/var-value "X" (:var-env %)) results))]
+    (is (= 2 (count results)))
+    (is (contains? x-vals {:val :red}))
+    (is (contains? x-vals {:val :blue}))))
+
 ;;; ── solve-n — result-count limiting ─────────────────────────────────────────
 
 (deftest solve-n-test
