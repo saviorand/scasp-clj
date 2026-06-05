@@ -9,7 +9,10 @@
 
    var-value is one of:
      {:val v}                                             ; bound to value v
-     {:constraints #{v1 …} :bindable? bool :loop-var n}  ; unbound/constrained
+     {:constraints #{v1 …}                               ; unbound/constrained
+      :numeric-bounds {:lo -Inf :hi +Inf :lo-open? bool :hi-open? bool}
+      :numeric-neq    #{n…}
+      :bindable? bool :loop-var n}
      {:link id}                                           ; alias (union-find link)"
   (:require [scasp.term :as term]
             [clojure.set :as set]))
@@ -43,7 +46,55 @@
 
 ;;; ── Variable value lookup ────────────────────────────────────────────────────
 
-(def ^:private default-unbound {:constraints #{} :bindable? true :loop-var 0})
+;;; ── Numeric bounds helpers ───────────────────────────────────────────────────
+
+(def ^:private +inf Double/POSITIVE_INFINITY)
+(def ^:private -inf Double/NEGATIVE_INFINITY)
+
+(def empty-numeric-bounds
+  {:lo -inf :hi +inf :lo-open? true :hi-open? true})
+
+(defn- bounds-consistent?
+  "Return true if the interval [lo, hi] (with open/closed flags) is non-empty."
+  [{:keys [lo hi lo-open? hi-open?]}]
+  (cond
+    (> lo hi) false
+    (= lo hi) (and (not lo-open?) (not hi-open?))
+    :else true))
+
+(defn tighten-lo
+  "Return updated bounds with lo raised to v (strict if open?), or nil if inconsistent."
+  [{:keys [lo lo-open?] :as bounds} v open?]
+  (let [new-lo   (if (> v lo) v lo)
+        new-open (if (> v lo) open?
+                   (if (= v lo) (or lo-open? open?) lo-open?))
+        b' (assoc bounds :lo new-lo :lo-open? new-open)]
+    (when (bounds-consistent? b') b')))
+
+(defn tighten-hi
+  "Return updated bounds with hi lowered to v (strict if open?), or nil if inconsistent."
+  [{:keys [hi hi-open?] :as bounds} v open?]
+  (let [new-hi   (if (< v hi) v hi)
+        new-open (if (< v hi) open?
+                   (if (= v hi) (or hi-open? open?) hi-open?))
+        b' (assoc bounds :hi new-hi :hi-open? new-open)]
+    (when (bounds-consistent? b') b')))
+
+(defn merge-numeric-bounds
+  "Intersect two numeric-bounds maps.  Returns merged bounds or nil if empty."
+  [b1 b2]
+  (-> b1
+      (tighten-lo (:lo b2) (:lo-open? b2))
+      (some-> (tighten-hi (:hi b2) (:hi-open? b2)))))
+
+(defn check-numeric-bounds
+  "Return true if numeric value v satisfies bounds."
+  [{:keys [lo hi lo-open? hi-open?] :as _bounds} v]
+  (and (if lo-open? (> v lo) (>= v lo))
+       (if hi-open? (< v hi) (<= v hi))))
+
+(def ^:private default-unbound
+  {:constraints #{} :numeric-bounds empty-numeric-bounds :numeric-neq #{} :bindable? true :loop-var 0})
 
 (defn var-value
   "Return the value struct for var-name.
@@ -90,12 +141,20 @@
 ;;; ── Constraint management ────────────────────────────────────────────────────
 
 (defn test-constraints
-  "Check that ground value val does not violate any constraints.
+  "Check that ground value val does not violate any disequality or numeric constraints.
    Returns ve unchanged on success, nil on violation."
   [constraints val ve]
-  (if (contains? constraints val)
-    nil
-    ve))
+  (cond
+    (contains? constraints val) nil
+    :else ve))
+
+(defn test-numeric-constraints
+  "Check val against numeric-bounds and numeric-neq.  Returns ve or nil."
+  [numeric-bounds numeric-neq val ve]
+  (when (number? val)
+    (when (check-numeric-bounds numeric-bounds val)
+      (when-not (contains? numeric-neq val)
+        ve))))
 
 (defn add-var-constraint
   "Add forbidden value c to var-name's constraint set.
@@ -104,6 +163,33 @@
   (when-let [cs (is-unbound? var-name ve)]
     (let [new-cs (update cs :constraints conj c)]
       (update-var-value var-name new-cs ve))))
+
+(defn add-numeric-bound
+  "Add a numeric inequality constraint on var-name.
+   op is one of :< :> :=< :>= :=:= :arith-ne, val is the ground numeric value.
+   Returns updated ve or nil on immediate inconsistency."
+  [var-name op val ve]
+  (when-let [cs (is-unbound? var-name ve)]
+    (let [bounds (:numeric-bounds cs)
+          neq    (:numeric-neq cs)]
+      (case op
+        :>    (when-let [b' (tighten-lo bounds val true)]
+                (update-var-value var-name (assoc cs :numeric-bounds b') ve))
+        :>=   (when-let [b' (tighten-lo bounds val false)]
+                (update-var-value var-name (assoc cs :numeric-bounds b') ve))
+        :<    (when-let [b' (tighten-hi bounds val true)]
+                (update-var-value var-name (assoc cs :numeric-bounds b') ve))
+        :=<   (when-let [b' (tighten-hi bounds val false)]
+                (update-var-value var-name (assoc cs :numeric-bounds b') ve))
+        :=:=  (when (check-numeric-bounds bounds val)
+                (when-not (contains? neq val)
+                  (update-var-value var-name {:val val} ve)))
+        :arith-ne (let [new-neq (conj neq val)]
+                    (if (and (not (= (:lo bounds) (:hi bounds)))
+                             (= (:lo bounds) val) (= (:hi bounds) val))
+                      nil  ; single-point interval and we're excluding that point
+                      (update-var-value var-name (assoc cs :numeric-neq new-neq) ve)))
+        nil))))
 
 ;;; ── Union-find: unify two variables ─────────────────────────────────────────
 
@@ -123,60 +209,64 @@
 
       ;; Both unbound/constrained → merge into v1, link v2 → v1
       (and (is-unbound? v1 ve) (is-unbound? v2 ve))
-      (let [cs1 (:constraints (is-unbound? v1 ve))
-            cs2 (:constraints (is-unbound? v2 ve))
-            f1  (:bindable?   (is-unbound? v1 ve))
-            f2  (:bindable?   (is-unbound? v2 ve))
-            lv1 (:loop-var    (is-unbound? v1 ve))
-            lv2 (:loop-var    (is-unbound? v2 ve))
-            merged {:constraints (set/union cs1 cs2)
-                    :bindable?   (and f1 f2)
-                    :loop-var    (merge-loop-var lv1 lv2)}
-            ve1 (update-var-value v1 merged ve)
-            fid (get-value-id v1 ve1)]
-        (if id2
-          (assoc-in ve1 [:values id2] {:link fid})
-          (let [new-id (:id-cnt ve1)]
-            (-> ve1
-                (assoc-in [:names v2] new-id)
-                (assoc-in [:values new-id] {:link fid})
-                (update :id-cnt inc)))))
+      (let [u1  (is-unbound? v1 ve)
+            u2  (is-unbound? v2 ve)
+            merged-bounds (merge-numeric-bounds (:numeric-bounds u1) (:numeric-bounds u2))]
+        (when merged-bounds
+          (let [merged {:constraints   (set/union (:constraints u1) (:constraints u2))
+                        :numeric-bounds merged-bounds
+                        :numeric-neq    (set/union (:numeric-neq u1) (:numeric-neq u2))
+                        :bindable?      (and (:bindable? u1) (:bindable? u2))
+                        :loop-var       (merge-loop-var (:loop-var u1) (:loop-var u2))}
+                ve1 (update-var-value v1 merged ve)
+                fid (get-value-id v1 ve1)]
+            (if id2
+              (assoc-in ve1 [:values id2] {:link fid})
+              (let [new-id (:id-cnt ve1)]
+                (-> ve1
+                    (assoc-in [:names v2] new-id)
+                    (assoc-in [:values new-id] {:link fid})
+                    (update :id-cnt inc)))))))
 
       ;; v1 unbound, v2 bound → link v1 → v2
       (is-unbound? v1 ve)
-      (let [{:keys [constraints bindable?]} (is-unbound? v1 ve)]
+      (let [{:keys [constraints numeric-bounds numeric-neq bindable?]} (is-unbound? v1 ve)]
         (when bindable?
           (let [val (:val (var-value v2 ve))]
             (when-let [ve' (test-constraints constraints val ve)]
-              (let [fid2 (or id2 (do
-                                   ;; v2 not yet in env but is bound — shouldn't normally happen
-                                   (get-value-id v2 ve')))]
-                (if fid2
-                  (if id1
-                    (assoc-in ve' [:values id1] {:link fid2})
-                    (let [new-id (:id-cnt ve')]
-                      (-> ve'
-                          (assoc-in [:names v1] new-id)
-                          (assoc-in [:values new-id] {:link fid2})
-                          (update :id-cnt inc))))
-                  ;; v2 was never in env; just bind v1 directly
-                  (update-var-value v1 {:val val} ve')))))))
+              (when (or (not (number? val))
+                        (and (check-numeric-bounds numeric-bounds val)
+                             (not (contains? numeric-neq val))))
+                (let [fid2 (or id2 (get-value-id v2 ve'))]
+                  (if fid2
+                    (if id1
+                      (assoc-in ve' [:values id1] {:link fid2})
+                      (let [new-id (:id-cnt ve')]
+                        (-> ve'
+                            (assoc-in [:names v1] new-id)
+                            (assoc-in [:values new-id] {:link fid2})
+                            (update :id-cnt inc))))
+                    ;; v2 was never in env; just bind v1 directly
+                    (update-var-value v1 {:val val} ve'))))))))
 
       ;; v2 unbound, v1 bound → link v2 → v1
       (is-unbound? v2 ve)
-      (let [{:keys [constraints bindable?]} (is-unbound? v2 ve)]
+      (let [{:keys [constraints numeric-bounds numeric-neq bindable?]} (is-unbound? v2 ve)]
         (when bindable?
           (let [val (:val (var-value v1 ve))]
             (when-let [ve' (test-constraints constraints val ve)]
-              (if id1
-                (if id2
-                  (assoc-in ve' [:values id2] {:link id1})
-                  (let [new-id (:id-cnt ve')]
-                    (-> ve'
-                        (assoc-in [:names v2] new-id)
-                        (assoc-in [:values new-id] {:link id1})
-                        (update :id-cnt inc))))
-                (update-var-value v2 {:val val} ve'))))))
+              (when (or (not (number? val))
+                        (and (check-numeric-bounds numeric-bounds val)
+                             (not (contains? numeric-neq val))))
+                (if id1
+                  (if id2
+                    (assoc-in ve' [:values id2] {:link id1})
+                    (let [new-id (:id-cnt ve')]
+                      (-> ve'
+                          (assoc-in [:names v2] new-id)
+                          (assoc-in [:values new-id] {:link id1})
+                          (update :id-cnt inc))))
+                  (update-var-value v2 {:val val} ve')))))))
 
       :else nil)))
 

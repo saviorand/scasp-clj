@@ -98,11 +98,14 @@
     (term/is-var? t1)
     (when-let [cs (vars/is-unbound? t1 ve)]
       (when (:bindable? cs)
-        ;; Resolve t2 to a ground-ish value
         (let [t2r (vars/resolve-term t2 ve)]
           (when (or (not oc?) (occurs-check t1 t2r ve))
             (when-let [ve' (vars/test-constraints (:constraints cs) t2r ve)]
-              (vars/update-var-value t1 {:val t2r} ve'))))))
+              (if (number? t2r)
+                (when (and (vars/check-numeric-bounds (:numeric-bounds cs) t2r)
+                           (not (contains? (:numeric-neq cs) t2r)))
+                  (vars/update-var-value t1 {:val t2r} ve'))
+                (vars/update-var-value t1 {:val t2r} ve')))))))
 
     ;; non-var – var (symmetric)
     (term/is-var? t2)

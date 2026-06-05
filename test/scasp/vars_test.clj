@@ -15,10 +15,14 @@
     (is (= {:val :foo} (vars/var-value "X" ve')))))
 
 (deftest default-unbound-test
-  (let [ve (vars/new-var-env)]
-    ;; Variable not in env → default unbound struct
-    (is (= {:constraints #{} :bindable? true :loop-var 0}
-           (vars/var-value "X" ve)))
+  (let [ve (vars/new-var-env)
+        v  (vars/var-value "X" ve)]
+    ;; Variable not in env → default unbound struct with numeric bounds
+    (is (= #{} (:constraints v)))
+    (is (true? (:bindable? v)))
+    (is (= 0 (:loop-var v)))
+    (is (contains? v :numeric-bounds))
+    (is (contains? v :numeric-neq))
     (is (vars/is-unbound? "X" ve))))
 
 (deftest bind-and-check-test

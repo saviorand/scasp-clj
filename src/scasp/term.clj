@@ -157,7 +157,11 @@
 ;;;   Prolog ^     → :hat
 
 (def ^:private comparison-ops
-  #{:= :ne :is :=:= :arith-ne :< :> :=< :>= :term< :term> :term<= :term>=})
+  #{:= :ne :is :=:= :arith-ne :< :> :=< :>= :term< :term> :term<= :term>=
+    ;; CLP(R) symbolic comparison operators
+    :clp< :clp> :clp=< :clp>= :clp= :clp<>
+    ;; CLP(R) #-prefixed aliases
+    :hash= :hash< :hash> :hash>= :hash=< :hash<>})
 
 (def ^:private arith-ops
   #{:+ :- :* :div :idiv :rem :mod :<< :>> :pow :hat :abs :max :min :float :integer :sign})
@@ -216,7 +220,21 @@
    "?-"   :query
    ","    :and
    ";"    :or
-   "->"   :->})
+   "->"   :->
+   ;; CLP(R) s(CASP)-style symbolic operators (.<. .>. etc.)
+   ".<."  :clp<
+   ".>."  :clp>
+   ".=<." :clp=<
+   ".>=." :clp>=
+   ".=."  :clp=
+   ".<>." :clp<>
+   ;; CLP(R) #-prefixed aliases
+   "#="   :hash=
+   "#<"   :hash<
+   "#>"   :hash>
+   "#>="  :hash>=
+   "#=<"  :hash=<
+   "#<>"  :hash<>})
 
 (def op-kw->str
   "Reverse map: keyword → Prolog operator string for printing."

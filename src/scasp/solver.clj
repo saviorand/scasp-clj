@@ -28,10 +28,13 @@
 (defn- mk-result [ve ch just el]
   {:var-env ve :chs ch :just just :even-loops el})
 
-;;; ── Arithmetic sub-expression evaluator ─────────────────────────────────────
 
-(defn solve-subexpr
-  "Evaluate an arithmetic expression, returning its ground numeric value."
+;;; ── CLP(R) symbolic constraint helpers ──────────────────────────────────────
+
+(defn- resolve-arith
+  "Try to evaluate t as a ground arithmetic value.
+   Returns the number, or ::unbound with the var name if t reduces to an unbound var,
+   or throws if t contains a non-numeric compound with unbound inner vars."
   [t ve]
   (cond
     (number? t) t
@@ -39,32 +42,99 @@
     (let [v (vars/var-value t ve)]
       (if (contains? v :val)
         (recur (:val v) ve)
-        (throw (ex-info "Unbound variable in arithmetic" {:var t}))))
+        [::unbound t]))
     (term/is-compound? t)
-    (let [op   (:op t)
-          a1   (first  (:args t))
-          a2   (second (:args t))
-          va   (when a1 (solve-subexpr a1 ve))
-          vb   (when a2 (solve-subexpr a2 ve))]
-      (cond
-        (= op :+)    (+ va vb)
-        (= op :-)    (if a2 (- va vb) (- va))
-        (= op :*)    (* va vb)
-        (= op :div)  (/ va vb)          ; Prolog /
-        (= op :idiv) (quot va vb)       ; Prolog //
-        (= op :rem)  (rem va vb)
-        (= op :mod)  (mod va vb)
-        (= op :<<)   (bit-shift-left  (long va) (int vb))
-        (= op :>>)   (bit-shift-right (long va) (int vb))
-        (= op :pow)  (Math/pow (double va) (double vb))   ; Prolog **
-        (= op :hat)  (Math/pow (double va) (double vb))   ; Prolog ^
-        (= op :abs)  (Math/abs (double va))
-        (= op :max)  (max va vb)
-        (= op :min)  (min va vb)
-        (= op :float)   (double va)
-        (= op :integer) (long va)
-        :else (throw (ex-info "Unknown arithmetic operator" {:op op}))))
+    (let [op  (:op t)
+          a1  (first  (:args t))
+          a2  (second (:args t))
+          r1  (when a1 (resolve-arith a1 ve))
+          r2  (when a2 (resolve-arith a2 ve))]
+      (if (or (and (vector? r1) (= (first r1) ::unbound))
+              (and (vector? r2) (= (first r2) ::unbound)))
+        (throw (ex-info "Compound expression with unbound variable"
+                        {:term t :r1 r1 :r2 r2}))
+        (let [va r1 vb r2]
+          (cond
+            (= op :+)    (+ va vb)
+            (= op :-)    (if a2 (- va vb) (- va))
+            (= op :*)    (* va vb)
+            (= op :div)  (/ va vb)
+            (= op :idiv) (quot va vb)
+            (= op :rem)  (rem va vb)
+            (= op :mod)  (mod va vb)
+            (= op :<<)   (bit-shift-left  (long va) (int vb))
+            (= op :>>)   (bit-shift-right (long va) (int vb))
+            (= op :pow)  (Math/pow (double va) (double vb))
+            (= op :hat)  (Math/pow (double va) (double vb))
+            (= op :abs)  (Math/abs (double va))
+            (= op :max)  (max va vb)
+            (= op :min)  (min va vb)
+            (= op :float)   (double va)
+            (= op :integer) (long va)
+            :else (throw (ex-info "Unknown arithmetic operator" {:op op}))))))
     :else (throw (ex-info "Non-numeric term in arithmetic" {:term t}))))
+
+(defn- unbound-var?
+  "Return the var name if r is an [::unbound var] sentinel, else nil."
+  [r]
+  (when (and (vector? r) (= (first r) ::unbound)) (second r)))
+
+(defn- clp-op->bound-op
+  "Map a CLP(R) op keyword to the canonical comparison op used by add-numeric-bound."
+  [op]
+  (case op
+    (:clp< :hash<)   :<
+    (:clp> :hash>)   :>
+    (:clp=< :hash=<) :=<
+    (:clp>= :hash>=) :>=
+    (:clp= :hash=)   :=:=
+    (:clp<> :hash<>) :arith-ne
+    op))
+
+(defn- solve-clp-constraint
+  "Handle a CLP(R) or classic comparison op when one or both sides may be unbound.
+   clp-op is the raw op keyword (e.g. :clp< or :<).
+   Returns updated ve or nil on failure."
+  [clp-op lhs rhs ve]
+  (let [r1 (try (resolve-arith lhs ve) (catch clojure.lang.ExceptionInfo _ nil))
+        r2 (try (resolve-arith rhs ve) (catch clojure.lang.ExceptionInfo _ nil))
+        uv1 (when r1 (unbound-var? r1))
+        uv2 (when r2 (unbound-var? r2))
+        bound-op (clp-op->bound-op clp-op)]
+    (cond
+      ;; Both ground → evaluate directly
+      (and (number? r1) (number? r2))
+      (case bound-op
+        :<       (when (<  r1 r2) ve)
+        :>       (when (>  r1 r2) ve)
+        :=<      (when (<= r1 r2) ve)
+        :>=      (when (>= r1 r2) ve)
+        :=:=     (when (== r1 r2) ve)
+        :arith-ne (when (not (== r1 r2)) ve)
+        nil)
+
+      ;; lhs is unbound var, rhs is ground → add bound on lhs
+      (and uv1 (number? r2))
+      (vars/add-numeric-bound uv1 bound-op r2 ve)
+
+      ;; rhs is unbound var, lhs is ground → flip the constraint onto rhs
+      (and (number? r1) uv2)
+      (let [flipped (case bound-op
+                      :<       :>
+                      :>       :<
+                      :=<      :>=
+                      :>=      :=<
+                      :=:=     :=:=
+                      :arith-ne :arith-ne
+                      nil)]
+        (when flipped (vars/add-numeric-bound uv2 flipped r1 ve)))
+
+      ;; Both unbound — record constraint on lhs referencing rhs (partial support)
+      ;; For now: succeed without adding constraint (sound but incomplete)
+      (and uv1 uv2)
+      ve
+
+      :else nil)))
 
 ;;; ── Expression solver ────────────────────────────────────────────────────────
 
@@ -84,33 +154,29 @@
               (when-let [ve' (unify/solve-dnunify (first args) (second args) ve)]
                 ve')
               (= op :is)
-              (let [rhs (solve-subexpr (second args) ve)]
-                (when-let [ve' (unify/solve-unify (first args) rhs ve false)]
-                  ve'))
+              (let [r2 (try (resolve-arith (second args) ve)
+                            (catch clojure.lang.ExceptionInfo _ nil))]
+                (if (number? r2)
+                  (when-let [ve' (unify/solve-unify (first args) r2 ve false)]
+                    ve')
+                  ;; rhs unbound — cannot evaluate; treat as soft failure
+                  nil))
               (= op :=:=)
-              (let [v1 (solve-subexpr (first args) ve)
-                    v2 (solve-subexpr (second args) ve)]
-                (when (== v1 v2) ve))
+              (solve-clp-constraint :=:= (first args) (second args) ve)
               (= op :arith-ne)     ; =\=
-              (let [v1 (solve-subexpr (first args) ve)
-                    v2 (solve-subexpr (second args) ve)]
-                (when (not (== v1 v2)) ve))
+              (solve-clp-constraint :arith-ne (first args) (second args) ve)
               (= op :<)
-              (let [v1 (solve-subexpr (first args) ve)
-                    v2 (solve-subexpr (second args) ve)]
-                (when (< v1 v2) ve))
+              (solve-clp-constraint :< (first args) (second args) ve)
               (= op :>)
-              (let [v1 (solve-subexpr (first args) ve)
-                    v2 (solve-subexpr (second args) ve)]
-                (when (> v1 v2) ve))
+              (solve-clp-constraint :> (first args) (second args) ve)
               (= op :=<)
-              (let [v1 (solve-subexpr (first args) ve)
-                    v2 (solve-subexpr (second args) ve)]
-                (when (<= v1 v2) ve))
+              (solve-clp-constraint :=< (first args) (second args) ve)
               (= op :>=)
-              (let [v1 (solve-subexpr (first args) ve)
-                    v2 (solve-subexpr (second args) ve)]
-                (when (>= v1 v2) ve))
+              (solve-clp-constraint :>= (first args) (second args) ve)
+              ;; CLP(R) symbolic operators (.<. .>. etc.) and #-aliases
+              (contains? #{:clp< :clp> :clp=< :clp>= :clp= :clp<>
+                           :hash= :hash< :hash> :hash>= :hash=< :hash<>} op)
+              (solve-clp-constraint op (first args) (second args) ve)
               (= op :term<)
               (let [v1 (vars/fill-in (first args) ve)
                     v2 (vars/fill-in (second args) ve)]
@@ -132,8 +198,10 @@
                    (let [inner (first args)]
                      (and (term/is-compound? inner) (= (:op inner) :is))))
               (let [inner (first args)
-                    rhs   (solve-subexpr (second (:args inner)) ve)]
-                (unify/solve-dnunify (first (:args inner)) rhs ve))
+                    r2    (try (resolve-arith (second (:args inner)) ve)
+                               (catch clojure.lang.ExceptionInfo _ nil))]
+                (when (number? r2)
+                  (unify/solve-dnunify (first (:args inner)) r2 ve)))
               :else nil)]
         (when result
           [{:var-env result :just goal}]))

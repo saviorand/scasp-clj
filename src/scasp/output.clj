@@ -22,10 +22,24 @@
     (let [v (vars/var-value t ve)]
       (if (contains? v :val)
         (fmt-term (:val v) ve)
-        (let [cs (:constraints v)]
-          (if (empty? cs)
+        (let [cs     (:constraints v)
+              bounds (:numeric-bounds v)
+              neq    (:numeric-neq v)
+              +inf   Double/POSITIVE_INFINITY
+              -inf   Double/NEGATIVE_INFINITY
+              dis-parts (map #(str "\\=" (fmt-term % ve)) cs)
+              num-parts (when bounds
+                          (let [{:keys [lo hi lo-open? hi-open?]} bounds
+                                lo-part (when (not= lo -inf)
+                                          (str t (if lo-open? ">" ">=") lo))
+                                hi-part (when (not= hi +inf)
+                                          (str t (if hi-open? "<" "<=") hi))
+                                neq-parts (map #(str t "=\\=" %) neq)]
+                            (filter some? (concat [lo-part hi-part] neq-parts))))
+              all-parts (concat dis-parts num-parts)]
+          (if (empty? all-parts)
             t
-            (str t "{" (str/join "," (map #(str "\\=" (fmt-term % ve)) cs)) "}")))))
+            (str t "{" (str/join "," all-parts) "}")))))
 
     (term/is-atom? t)
     (let [n (name t)]
