@@ -15,7 +15,7 @@
 ;;; ── Construction ─────────────────────────────────────────────────────────────
 
 (defn new-program []
-  {:rules {} :query [] :predicates #{} :nmr-check []})
+  {:rules {} :query [] :predicates #{} :nmr-check [] :abducibles #{}})
 
 ;;; ── Functor helpers ──────────────────────────────────────────────────────────
 
@@ -103,6 +103,18 @@
   "Build a list of n fresh variable names: [\"_A0\" \"_A1\" …]."
   [n]
   (mapv #(str "_A" %) (range n)))
+
+;;; ── Abducible support ────────────────────────────────────────────────────────
+
+(defn mark-abducible
+  "Register functor-str as abducible in the program."
+  [prog functor-str]
+  (update prog :abducibles conj functor-str))
+
+(defn abducible?
+  "True if functor-str is marked as abducible."
+  [functor-str prog]
+  (contains? (:abducibles prog) functor-str))
 
 ;;; ── Create a unique internal functor ────────────────────────────────────────
 

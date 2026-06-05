@@ -151,32 +151,36 @@
       (solve-goals [goal] ve chs call-stack in-nmr? program)
       ;; V unbound: mark non-bindable + non-loop
       (let [marked (assoc orig-cs :bindable? false :loop-var -1)
-            ve1    (vars/update-var-value v-name marked ve)]
-        (lazy-seq
-          (mapcat
-            (fn [{ve2 :var-env chs1 :chs just :just el :even-loops}]
-              (let [cur-cs (vars/is-unbound? v-name ve2)]
-                (cond
-                  ;; Still unbound (no constraints acquired) → success
-                  (and cur-cs (empty? (:constraints cur-cs)))
-                  [(mk-result ve2 chs1 {:forall v-name :body just} el)]
+            ve1    (vars/update-var-value v-name marked ve)
+            body-results (solve-goals [goal] ve1 chs call-stack in-nmr? program)]
+        ;; Vacuous truth: goal produces no solutions → forall trivially succeeds
+        (if (empty? body-results)
+          [(mk-result ve chs {:forall v-name :body :vacuous} [])]
+          (lazy-seq
+            (mapcat
+              (fn [{ve2 :var-env chs1 :chs just :just el :even-loops}]
+                (let [cur-cs (vars/is-unbound? v-name ve2)]
+                  (cond
+                    ;; Still unbound (no constraints acquired) → success
+                    (and cur-cs (empty? (:constraints cur-cs)))
+                    [(mk-result ve2 chs1 {:forall v-name :body just} el)]
 
-                  ;; Acquired constraints → must succeed for each value
-                  (and cur-cs (seq (:constraints cur-cs)))
-                  (let [new-vals (set/difference
-                                  (:constraints cur-cs)
-                                  (:constraints orig-cs))]
-                    (if (empty? new-vals)
-                      [(mk-result ve2 chs1 {:forall v-name :body just} el)]
-                      (when (every? (fn [val]
-                                      (let [ve3 (vars/update-var-value v-name {:val val} ve2)
-                                            g2  (term/substitute v-name val goal)]
-                                        (seq (solve-goals [g2] ve3 chs1 call-stack in-nmr? program))))
-                                    new-vals)
-                        [(mk-result ve2 chs1 {:forall v-name :body just} el)])))
-                  ;; V got bound → fail
-                  :else [])))
-            (solve-goals [goal] ve1 chs call-stack in-nmr? program)))))))
+                    ;; Acquired constraints → must succeed for each value
+                    (and cur-cs (seq (:constraints cur-cs)))
+                    (let [new-vals (set/difference
+                                    (:constraints cur-cs)
+                                    (:constraints orig-cs))]
+                      (if (empty? new-vals)
+                        [(mk-result ve2 chs1 {:forall v-name :body just} el)]
+                        (when (every? (fn [val]
+                                        (let [ve3 (vars/update-var-value v-name {:val val} ve2)
+                                              g2  (term/substitute v-name val goal)]
+                                          (seq (solve-goals [g2] ve3 chs1 call-stack in-nmr? program))))
+                                      new-vals)
+                          [(mk-result ve2 chs1 {:forall v-name :body just} el)])))
+                    ;; V got bound → fail
+                    :else [])))
+              body-results)))))))
 
 ;;; ── Goal dispatcher ──────────────────────────────────────────────────────────
 
@@ -248,19 +252,25 @@
 ;;; ── Rule expansion ───────────────────────────────────────────────────────────
 
 (defn expand-call
-  "Expand a predicate call by looking up rules and trying each."
+  "Expand a predicate call by looking up rules and trying each.
+   If the functor is abducible and has no rules, succeed with goal added to CHS."
   [goal functor args ve chs call-stack in-nmr? even-loops program]
   (let [cvars            (collect-cvars even-loops)
         [entry chs1 ve1] (chs/add-to-chs functor args false in-nmr? chs ve cvars)
         rules            (prog/defined-rules functor program)
         new-stack        (into [{:goal goal :rule nil}] call-stack)]
-    (lazy-seq
-      (mapcat
-        (fn [{ve2 :var-env chs2 :chs just :just el :even-loops}]
-          (let [chs3           (chs/remove-from-chs entry functor chs2)
-                [_ chs4 _ve4]  (chs/add-to-chs functor args true in-nmr? chs3 ve2 cvars)]
-            [(mk-result ve2 chs4 just el)]))
-        (expand-call2 goal rules ve1 chs1 new-stack in-nmr? program)))))
+    (if (and (empty? rules) (prog/abducible? functor program))
+      ;; Abducible with no rules: succeed, recording goal as assumed true
+      (let [chs2          (chs/remove-from-chs entry functor chs1)
+            [_ chs3 _ve3] (chs/add-to-chs functor args true in-nmr? chs2 ve1 cvars)]
+        [(mk-result ve1 chs3 {:abduced goal} [])])
+      (lazy-seq
+        (mapcat
+          (fn [{ve2 :var-env chs2 :chs just :just el :even-loops}]
+            (let [chs3           (chs/remove-from-chs entry functor chs2)
+                  [_ chs4 _ve4]  (chs/add-to-chs functor args true in-nmr? chs3 ve2 cvars)]
+              [(mk-result ve2 chs4 just el)]))
+          (expand-call2 goal rules ve1 chs1 new-stack in-nmr? program))))))
 
 (defn expand-call2
   "Try each rule in turn; yield results for matching rules."
@@ -280,10 +290,33 @@
           ;; Try remaining rules
           (expand-call2 goal (rest rules) ve chs call-stack in-nmr? program))))))
 
+;;; ── DCC (Denial Consistency Check) ──────────────────────────────────────────
+
+(defn- run-dcc
+  "Post-query check for integrity constraints with variables.
+   For each _false/0 rule, solve its body with fresh alpha-renamed vars
+   against the result's var-env and chs. If any body succeeds, fail the branch.
+   Abducibles are disabled during DCC — only existing rules and CHS entries count."
+  [result program]
+  (let [false-rules (prog/defined-rules "_false/0" program)]
+    (if (empty? false-rules)
+      [result]
+      (let [{:keys [var-env chs]} result
+            ;; Run DCC against the result's CHS so abduced facts are visible,
+            ;; but strip abducibles to prevent new abductions during the check.
+            dcc-program (assoc program :abducibles #{})]
+        (if (every? (fn [{:keys [head body]}]
+                      (let [[_ renamed-body ve'] (vars/get-unique-vars head body var-env)
+                            solutions (solve-goals renamed-body ve' chs [] false dcc-program)]
+                        (empty? solutions)))
+                    false-rules)
+          [result]
+          [])))))
+
 ;;; ── Top-level entry ──────────────────────────────────────────────────────────
 
 (defn run-query
-  "Run the program query with NMR check.
+  "Run the program query with NMR check, then apply DCC.
    Returns a lazy sequence of {:var-env :chs :just :even-loops}."
   [program]
   (let [query  (prog/defined-query program)
@@ -291,4 +324,5 @@
         goals  (into (vec query) nmr)
         ve     (vars/new-var-env)
         ch     (chs/new-chs)]
-    (solve-goals goals ve ch [] false program)))
+    (mapcat #(run-dcc % program)
+            (solve-goals goals ve ch [] false program))))

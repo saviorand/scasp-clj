@@ -98,16 +98,47 @@
 
 ;;; ── Coinductive failure (negation in CHS) ────────────────────────────────────
 
+(defn- match-neg-entry
+  "Find the first in-progress (success=false) entry for the dual of functor
+   whose args unify with args. Returns the entry or nil."
+  [functor args ve chs]
+  (let [neg-f       (term/negate-functor functor)
+        neg-entries (filter #(not (:success? %)) (entries-for neg-f chs))]
+    (exact-match args neg-entries ve)))
+
 (defn- coinductive-failure?
   "True if the negation of functor/args is present in CHS with success=false
    (i.e., currently being proven on this branch — OLON constructive coinduction).
    A success=true entry means the positive already completed elsewhere; that is
    not a loop and must not trigger coinductive success for the dual."
   [functor args ve chs]
-  (let [neg-f (term/negate-functor functor)
-        ;; Only entries that are still being proven (success? false) on this branch
-        neg-entries (filter #(not (:success? %)) (entries-for neg-f chs))]
-    (boolean (exact-match args neg-entries ve))))
+  (boolean (match-neg-entry functor args ve chs)))
+
+(defn- propagate-neg-constraints
+  "When coinductive failure fires, propagate disequality constraints from
+   the matching dual CHS entry's args to the current call's args.
+   For each position where the CHS entry arg is a frozen var with constraints,
+   add those constraints to the corresponding current arg via disequality.
+   Returns updated ve."
+  [functor args ve chs]
+  (if-let [entry (match-neg-entry functor args ve chs)]
+    (reduce (fn [ve' [call-arg entry-arg]]
+              (let [ev (vars/var-value entry-arg ve')]
+                (if (and (term/is-var? entry-arg)
+                         (not (contains? ev :val))
+                         (seq (:constraints ev)))
+                  ;; Propagate each constraint as a disequality on call-arg
+                  (reduce (fn [ve'' c]
+                            (or (vars/add-var-constraint
+                                 (if (term/is-var? call-arg) call-arg entry-arg)
+                                 c ve'')
+                                ve''))
+                          ve'
+                          (:constraints ev))
+                  ve')))
+            ve
+            (map vector args (:args entry)))
+    ve))
 
 ;;; ── Constructive coinductive failure ─────────────────────────────────────────
 
@@ -207,7 +238,7 @@
         ;; constructive coinductive failure: negation in CHS → succeed (constrained)
         (coinductive-failure? functor args ve chs)
         [{:result    :coinductive-success
-          :var-env   ve
+          :var-env   (propagate-neg-constraints functor args ve chs)
           :even-loop {:cycle [] :cvars []}}]
 
         :else

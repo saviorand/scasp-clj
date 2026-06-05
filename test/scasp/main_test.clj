@@ -116,3 +116,84 @@
                (r (c :color :blue))]]
     (is (= 3 (count (main/solve-all rules [(c :color "C")]))))
     (is (= 2 (count (vec (main/solve-n 2 rules [(c :color "C")])))))))
+
+;;; ── DCC: integrity constraints with variables (graph-coloring style) ─────────
+
+(deftest dcc-variable-constraint-test
+  ;; node(a). node(b). color(red). color(blue).
+  ;; col(X, C) :- node(X), color(C), not diff_col(X, C).
+  ;; diff_col(a, blue).
+  ;; :- col(X, C), col(Y, C), edge(X, Y).   % constraint with vars
+  ;; edge(a, b).
+  ;; ?- col(a, C).
+  ;; Without constraint: col(a, red) and col(a, blue) are both candidates
+  ;; diff_col(a, blue) rules out col(a, blue), so only col(a, red) survives.
+  ;; The edge constraint (a,b share no common color) eliminates col(a,C)
+  ;; if col(b,C) also holds for the same C.
+  ;; col(b, red) holds (no diff_col for b), col(b, blue) holds.
+  ;; edge(a,b) exists, so any color shared by a and b fires the constraint.
+  ;; col(a, red) + col(b, red) + edge(a,b) → constraint fires → no answers.
+  (let [false-head {:op :_false :args []}
+        rules [(r (c :node :a))
+               (r (c :node :b))
+               (r (c :color :red))
+               (r (c :color :blue))
+               (r (c :col "X" "C") (c :node "X") (c :color "C") (naf (c :diff_col "X" "C")))
+               (r (c :diff_col :a :blue))
+               (r (c :edge :a :b))
+               {:head false-head :body [(c :col "X" "C") (c :col "Y" "C") (c :edge "X" "Y")]}]
+        results (main/solve-all rules [(c :col "X" "C")])]
+    (is (= 0 (count results)))))
+
+;;; ── Abducible support ────────────────────────────────────────────────────────
+
+(deftest abducible-test
+  ;; #abducible fly/1
+  ;; bird(tweety).
+  ;; ?- fly(tweety).   % abduced: fly(tweety) assumed true with no rules
+  (let [rules [(r (c :bird :tweety))]
+        results (main/solve-all rules [(c :fly :tweety)] #{"fly/1"})]
+    (is (= 1 (count results))))
+  ;; With a constraint that fires: fly(X) if bird(X) but not penguin(X).
+  ;; penguin(sam).
+  ;; :- fly(sam).
+  ;; fly(sam) is abducible but the constraint rules it out.
+  (let [false-head {:op :_false :args []}
+        rules [(r (c :bird :tweety))
+               (r (c :penguin :sam))
+               {:head false-head :body [(c :fly :sam)]}]
+        res-tweety (main/solve-all rules [(c :fly :tweety)] #{"fly/1"})
+        res-sam    (main/solve-all rules [(c :fly :sam)]    #{"fly/1"})]
+    (is (= 1 (count res-tweety)))
+    (is (= 0 (count res-sam)))))
+
+;;; ── solve-forall vacuous truth ───────────────────────────────────────────────
+
+(deftest forall-vacuous-truth-test
+  ;; forall(X, impossible(X)) should succeed when impossible/1 has no facts.
+  ;; In dual form this appears as a generated forall in the dual of a rule.
+  ;; We test it directly via a program that would expose vacuous forall:
+  ;;   p :- forall(X, q(X)).
+  ;;   (no q facts)
+  ;;   ?- p.   % should succeed vacuously
+  (let [rules [(r (c :p) {:op :forall :args ["X" (c :q "X")]})]
+        results (main/solve-all rules [(c :p)])]
+    (is (seq results))))
+
+;;; ── match-neg constraint propagation ────────────────────────────────────────
+
+(deftest match-neg-propagation-test
+  ;; p(X) :- not q(X).
+  ;; q(a).
+  ;; ?- p(X).
+  ;; not_q(X) fires: q(a) in CHS makes not_q(a) fail. p(a) fails.
+  ;; p(X) where X≠a should coinductively succeed with constraint X≠a propagated.
+  ;; We check that p(a) does not appear in answers and that an answer exists.
+  (let [rules [(r (c :p "X") (naf (c :q "X")))
+               (r (c :q :a))]
+        results (main/solve-all rules [(c :p "X")])
+        x-vals  (map #(vars/var-value "X" (:var-env %)) results)]
+    ;; At least one answer
+    (is (seq results))
+    ;; No answer has X=a
+    (is (not (some #(= {:val :a} %) x-vals)))))
