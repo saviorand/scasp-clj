@@ -107,13 +107,15 @@
 ;;; ── Predicates on functors ───────────────────────────────────────────────────
 
 (def ^:private scasp-builtins
-  #{"true/0" "false/0" "call/1" "findall/3" "!/0"
-    "_false/0" "_nmr_check/0"})
+  #{"true/0" "false/0" "fail/0" "call/1" "call/2" "call/3" "call/4"
+    "findall/3" "!/0" "_false/0" "_nmr_check/0"})
 
 (defn scasp-builtin?
   "True if functor is a built-in that should not have duals generated."
   [f]
-  (contains? scasp-builtins f))
+  (or (contains? scasp-builtins f)
+      (= "findall" (term/functor-name-str f))
+      (= "call"    (term/functor-name-str f))))
 
 (defn headless-functor?
   "The dummy functor used for integrity constraints (:- body.)."

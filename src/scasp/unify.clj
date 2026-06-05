@@ -104,7 +104,8 @@
               (if (number? t2r)
                 (when (and (vars/check-numeric-bounds (:numeric-bounds cs) t2r)
                            (not (contains? (:numeric-neq cs) t2r)))
-                  (vars/update-var-value t1 {:val t2r} ve'))
+                  (when-let [ve'' (vars/check-var-constraints t1 t2r ve')]
+                    (vars/update-var-value t1 {:val t2r} ve'')))
                 (vars/update-var-value t1 {:val t2r} ve')))))))
 
     ;; non-var – var (symmetric)

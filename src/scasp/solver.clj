@@ -129,10 +129,16 @@
                       nil)]
         (when flipped (vars/add-numeric-bound uv2 flipped r1 ve)))
 
-      ;; Both unbound — record constraint on lhs referencing rhs (partial support)
-      ;; For now: succeed without adding constraint (sound but incomplete)
+      ;; Both unbound — record relational constraint on lhs referencing rhs,
+      ;; and the flipped constraint on rhs referencing lhs
       (and uv1 uv2)
-      ve
+      (let [flipped (case bound-op
+                      :<  :>  :>  :<  :=<  :>=  :>=  :=<
+                      :=:= :=:=  :arith-ne :arith-ne  nil)
+            ve' (vars/add-var-relational-constraint uv1 bound-op uv2 ve)]
+        (if (and ve' flipped)
+          (vars/add-var-relational-constraint uv2 flipped uv1 ve')
+          ve'))
 
       :else nil)))
 
@@ -156,11 +162,15 @@
               (= op :is)
               (let [r2 (try (resolve-arith (second args) ve)
                             (catch clojure.lang.ExceptionInfo _ nil))]
-                (if (number? r2)
+                (cond
+                  (number? r2)
                   (when-let [ve' (unify/solve-unify (first args) r2 ve false)]
                     ve')
-                  ;; rhs unbound — cannot evaluate; treat as soft failure
-                  nil))
+                  ;; rhs is a single unbound var → defer as equality constraint
+                  (and r2 (unbound-var? r2))
+                  (solve-clp-constraint :=:= (first args) (second args) ve)
+                  ;; rhs is a compound with unbound inner vars — cannot defer, soft fail
+                  :else nil))
               (= op :=:=)
               (solve-clp-constraint :=:= (first args) (second args) ve)
               (= op :arith-ne)     ; =\=
@@ -269,6 +279,26 @@
   [goals ve chs call-stack in-nmr? program]
   (solve-goals* goals ve chs call-stack in-nmr? [] program))
 
+;;; ── findall/3 ────────────────────────────────────────────────────────────────
+
+(defn- solve-findall
+  "findall(Template, Goal, List): collect all Template instances for which Goal
+   succeeds into List.  Always succeeds (returns [] if Goal fails)."
+  [template goal-term list-arg ve chs call-stack in-nmr? program]
+  (let [solutions (solve-goals [goal-term] ve chs call-stack in-nmr? program)
+        bag       (mapv (fn [{ve' :var-env}]
+                          (vars/fill-in template ve'))
+                        solutions)
+        ;; Build a Prolog-style list term from bag
+        list-term (reduce (fn [acc item]
+                            {:op :cons :args [item acc]})
+                          (keyword "[]")
+                          (reverse bag))]
+    (when-let [ve' (unify/solve-unify list-arg list-term ve false)]
+      [(mk-result ve' chs {:findall template} [])])))
+
+;;; ── Goal dispatcher ──────────────────────────────────────────────────────────
+
 (defn solve-goal
   "Dispatch a single goal to the appropriate solver."
   [goal ve chs call-stack in-nmr? even-loops program]
@@ -277,6 +307,33 @@
     (term/is-forall? goal)
     (let [[v g] (:args goal)]
       (solve-forall v g ve chs call-stack in-nmr? program))
+
+    ;; findall(Template, Goal, List)
+    (and (term/is-compound? goal) (= (:op goal) :findall) (= (count (:args goal)) 3))
+    (let [[tmpl g lst] (:args goal)]
+      (or (solve-findall tmpl g lst ve chs call-stack in-nmr? program) []))
+
+    ;; call(Goal) or call(Goal, Arg…) — partial application
+    (and (term/is-compound? goal) (= (:op goal) :call) (pos? (count (:args goal))))
+    (let [called (vars/fill-in (first (:args goal)) ve)
+          extra  (rest (:args goal))
+          ;; If extra args, extend the called term's arg list
+          effective (if (seq extra)
+                      (if (term/is-compound? called)
+                        (update called :args into extra)
+                        (throw (ex-info "call/N: first arg must be compound" {:called called})))
+                      called)]
+      (solve-goal effective ve chs call-stack in-nmr? even-loops program))
+
+    ;; true/0
+    (and (term/is-compound? goal) (= (:op goal) :true) (empty? (:args goal)))
+    [(mk-result ve chs :success [])]
+
+    ;; false/0 or fail/0
+    (and (term/is-compound? goal)
+         (or (= (:op goal) :false) (= (:op goal) :fail))
+         (empty? (:args goal)))
+    []
 
     ;; Arithmetic / comparison expression
     (term/is-expr? goal)

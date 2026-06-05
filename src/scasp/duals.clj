@@ -46,6 +46,20 @@
         :term>    (assoc g :op :term<=)
         :term<=   (assoc g :op :term>)
         :term>=   (assoc g :op :term<)
+        ;; CLP(R) symbolic operators
+        :clp<     (assoc g :op :clp>=)
+        :clp>     (assoc g :op :clp=<)
+        :clp=<    (assoc g :op :clp>)
+        :clp>=    (assoc g :op :clp<)
+        :clp=     (assoc g :op :clp<>)
+        :clp<>    (assoc g :op :clp=)
+        ;; CLP(R) #-prefixed aliases
+        :hash<    (assoc g :op :hash>=)
+        :hash>    (assoc g :op :hash=<)
+        :hash=<   (assoc g :op :hash>)
+        :hash>=   (assoc g :op :hash<)
+        :hash=    (assoc g :op :hash<>)
+        :hash<>   (assoc g :op :hash=)
         ;; Negation of arithmetic is/2 wraps in not
         :is       {:op :not :args [g]}
         ;; Regular predicate: wrap in not
