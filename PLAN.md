@@ -217,9 +217,8 @@ birds/Tweety, etc.) do NOT need CLP(Q/R).
   - `scasp.nmr`         — NMR check + call graph
   - `scasp.chs`         — Coinductive Hypothesis Set
   - `scasp.solver`      — core solve-goals engine
-  - `scasp.parser`      — tokenizer + term parser
   - `scasp.output`      — answer set + justification printing
-  - `scasp.main`        — CLI entry point
+  - `scasp.main`        — programmatic API (no parser — programs built as Clojure data)
 - [ ] Property-based test setup (test.check)
 - [ ] Port the `examples/` from refs/scasp as integration test fixtures
 
@@ -369,116 +368,143 @@ This is the heart of the system. Implement in order:
 
 ---
 
-### PHASE 8 — Parser
-**Reference**: `refs/scasp/src/sasp/tokenizer.pl`, `text_dcg.pl`, `io.pl`
-**Goal**: Parse sCASP/Prolog-syntax programs into the program data structure.
+### PHASE 8 — SKIPPED (no parser)
+No Prolog-syntax parser. Programs are built programmatically as Clojure data.
+See `scasp.main/build-program` and `prog/make-rule`.
 
-Input syntax:
-```prolog
-p(X) :- not q(X).          % rule
-q(X) :- not p(X).
-?- p(A).                    % query
-#show p/1.                  % directive
-#abducible ab/1.
-:- constraint_body.         % headless rule (integrity constraint)
+---
+
+### PHASE 9 — Output + Justification Trees ✅ DONE
+`scasp.output` is complete:
+- `fmt-term` — format any term with var-env bindings
+- `print-chs` — print the answer set (visible CHS entries)
+- `print-vars` — print query variable bindings
+- `print-justification` — print justification tree with indentation
+- `print-answer` — combined answer set printer
+- `collect-query-vars` — extract variable names from goals
+- `result-bindings` (in `scasp.main`) — extract bindings as a map
+
+---
+
+### PHASE 10 — Programmatic API + Integration Tests ✅ DONE
+`scasp.main` exposes the full public API:
+
+```clojure
+(build-program rules query)   ; compile duals + NMR, return program map
+(solve         rules query)   ; lazy seq of result maps
+(solve-n     n rules query)   ; take n results
+(solve-all     rules query)   ; force all results into a vector
+(result-bindings result vars) ; extract {var → value} map from a result
+(print-results results goals) ; print answer sets to stdout
+(print-program program)       ; print compiled rules (debug)
 ```
 
-- [ ] Tokenizer: atoms, variables (uppercase/underscore), numbers, operators, punctuation
-- [ ] Operator table: `:-`, `?-`, `not`, `is`, `=`, `\=`, `=:=`, `=\=`, `<`, `>`, `=<`, `>=`, `@<` etc.
-- [ ] Term parser: atoms, compounds, lists `[H|T]`, operator expressions with precedence
-- [ ] Rule parser: `head :- body.` and `?- query.`
-- [ ] Directive parser: `#show`, `#abducible`, `#pred`, `#domain`, `#table`, `#false`
-- [ ] Integration: load file → program data structure
-- [ ] Tests: all example programs in refs/scasp/examples/ parse correctly
+Result maps: `{:var-env :chs :just :even-loops}`
 
-Use `instaparse` or hand-written recursive descent. The Prolog DCG grammar in
-`text_dcg.pl` is the authoritative spec.
+Integration tests in `test/scasp/main_test.clj`:
+- [x] tweety — NAF default reasoning, X = tweety only
+- [x] family — recursive ancestor, Y = bob + ann
+- [x] olon — self-referential NAF (p :- not p), ?- not p succeeds
+- [x] solve-n — result count limiting
 
----
+**Bug fixed this session**: `chs/coinductive-failure?` was treating any
+`success? true` CHS entry for the positive literal as grounds for coinductive
+success of the dual. Fixed to only trigger on `success? false` entries (the
+positive is currently being proved on this branch = actual OLON loop case).
 
-### PHASE 9 — Output + Justification Trees
-**Reference**: `refs/scasp/src/sasp/output.pl`, `refs/scasp/src/scasp_io.pl`
-**Goal**: Print answer sets and justification trees matching sCASP's format.
-
-- [ ] `print-chs` — print the answer set (selected literals + their constraints)
-- [ ] `print-vars` — print query variable bindings
-- [ ] `format-term` — fill in variable values, strip internal prefixes (`_chk`, `not_`, etc.)
-- [ ] `print-justification` — print the tree of rules + goals that justified the answer
-- [ ] `print-abducibles` — list abducible atoms in the model
-- [ ] Format modes: `--plain`, `--human`, `--long`, `--mid`, `--short`
-- [ ] Tests: output matches sCASP reference output for example programs
-
----
-
-### PHASE 10 — CLI + Integration Tests
-**Goal**: A working `scasp` command that passes the reference test suite.
-
-- [ ] CLI arg parsing: `-s0`, `-s5`, `--tree`, `--code`, `--human`, `--quiet`, etc.
-- [ ] `main` entry: load file → compile duals → NMR check → run query → print results
-- [ ] Interactive mode (`-i`): REPL loop reading queries
-- [ ] Integration test runner: run all `refs/scasp/examples/*.pl` and diff output
-      against reference (or against sCASP itself if installed)
-- [ ] Test cases from `refs/scasp/test/`
+**Still missing in Phase 10**:
+- Integrity constraints (`_false/0` rules, `:- body.`) — `generate-nmr-check`
+  adds `not__false/0` as a fact but does not actually enforce that `_false`
+  never holds. Needs: add `not _false` goal to every query, or run the
+  constraint bodies as checks and fail the branch if any fires.
 
 ---
 
 ### PHASE 11 — CLP(Q/R) Constraint Arithmetic
 **Reference**: `refs/scasp/src/clp_clpq.pl`, `refs/scasp/src/clp_disequality_rt.pl`
-**Goal**: Support `.=.`, `.>.`, `.<.`, `.>=.`, `.=<.`, `.<>.` operators for rational arithmetic.
+**Goal**: Support symbolic numeric constraints: `.=.` `.>.` `.<.` `.>=.` `.=<.` `.<>.`
 
 Needed for:
-- Event Calculus temporal programs (`T .>. 0`, `T2 .-. T1 .<. 35`)
+- Programs where variables appear in answers with numeric constraints
+  (e.g. `X .>. 0, X .<. 10`)
+- Event Calculus temporal programs
 - Yale shooting scenario
-- Any program with symbolic numeric variables in answers
+
+The interface to implement: add a constraint store alongside `var-env`.
+When a CLP constraint is encountered in a goal, add it to the store rather
+than evaluating it immediately. On `is/2` or comparison, check store
+satisfiability.
 
 Options (decide at implementation time):
-- [ ] Option A: Implement rational interval constraint store (Simplex-based)
-- [ ] Option B: Delegate to choco-solver or JaCoP via interop
-- [ ] Option C: Spawn a SWI-Prolog subprocess for CLP queries
-
-Whichever option: the interface is `solve-clp-constraint(constraint, var-env) -> var-env | nil`.
-
----
-
-### PHASE 12 — Advanced Features
-**Goal**: Feature parity with the `scasp.pl` top-level.
-
-- [ ] `c_forall/2` — constrained forall (experimental, see `refs/scasp/src/scasp.pl`)
-- [ ] Dynamic Consistency Check (`--dcc`) — checks consistency of CHS on every step
-- [ ] `#table` / tabling — memoize certain predicates
-- [ ] `#abducible` — mark predicates as abducible (appear in answer even without rules)
-- [ ] HTML justification output (`--html`)
-- [ ] Timeout support (`--timeout`)
-- [ ] `--forget` — predicate forgetting (refs/scasp/src/modules/scasp_forgetting/)
-- [ ] Stratification analysis (refs/scasp/src/modules/scasp_stratification/)
-- [ ] Event Calculus module (refs/scasp/src/modules/scasp_event_calculus/)
+- Option A: Implement a simple interval/difference constraint store
+- Option B: Delegate to choco-solver or JaCoP via JVM interop
+- Option C: Extend `var-value` with a `:clp-constraints` field and use
+  a Simplex-based satisfiability check
 
 ---
 
-## Testing Strategy
+### PHASE 12 — Missing Solver Features
+**Goal**: Close the remaining gaps vs. the reference s(CASP).
 
-### Unit tests (each phase)
-Per-namespace unit tests. Test against known values derived from the Prolog
-source comments and docstrings.
+**12a — Integrity constraints** (highest priority, needed for graph coloring etc.)
 
-### Property-based tests (Phases 1–2)
-Use `test.check` to verify unification properties:
-- Idempotence: `unify(unify(t1, t2, env), t1, t2) = unify(t1, t2, env)`
-- Symmetry: `unify(t1, t2) succeeds iff unify(t2, t1) succeeds`
-- Var aliasing: if X=Y then binding X binds Y
+How `:- body.` rules work in s(CASP):
+- Represented as `{:head {:op :_false :args []} :body [...]}` in the program
+- During query execution, the solver must verify no integrity constraint fires
+- Fix: in `generate-nmr-check`, detect `_false/0` rules and append
+  `(not _false)` as a goal in the NMR check (so every query implicitly
+  checks that no constraint body holds)
 
-### Integration tests (Phases 7+)
-Run example programs through the solver and check answer sets. Golden outputs
-can be generated by running `scasp` (if installed) or reading the expected
-outputs from `refs/scasp/test/`.
+Steps:
+- [ ] In `nmr/generate-nmr-check`: if any `_false/0` rules exist, add
+      `{:op :not :args [{:op :_false :args []}]}` to the NMR check goals
+- [ ] Add dual for `_false/0` via `compile-duals` (currently skipped by
+      `headless-functor?` guard — that guard is correct, but we need the
+      *negation* check to work, so `not__false` must call the duals)
+- [ ] Test: graph coloring with 2 nodes and constraint `:- edge(X,Y), col(X,C), col(Y,C).`
 
-Priority examples (increasing difficulty):
-1. `tweety.pl` — basic default reasoning, no constraints
-2. `graph-color-v2.pl` — classic ASP, integrity constraints
-3. `1.family.pl` — recursive rules, negation
-4. `blocks-world.pl` — planning
-5. `benchmark_iclp18/towers_hanoi/` — loops, larger programs
-6. Yale shooting scenario — needs CLP(Q/R)
+**12b — Even-loop variable substitution** (correctness)
+
+When an even loop is detected in `chs/check-negations`, the loop variables
+(`cvars`) should be replaced with fresh substitution variables in the CHS entry
+(`gen-sub-vars` / `replace-vars` in the reference). Currently the cvars are
+detected but not substituted back. This matters for programs where a looping
+variable later gets constrained differently in different branches.
+
+Steps:
+- [ ] In `chs/add-to-chs` (or `expand-call`): after detecting an even loop,
+      call a `replace-vars` helper that substitutes each cvar with a fresh var
+      in the CHS entry being added
+- [ ] Add test: even loop where the loop variable is later bound differently
+
+**12c — `#abducible` support**
+
+Abducible predicates appear in answer sets even though they have no rules.
+Currently, calling an abducible predicate fails (no rules found).
+
+Steps:
+- [ ] Track abducible functors in the program map: `{:abducibles #{functor}}`
+- [ ] In `expand-call`: if functor is abducible and no rules exist, succeed
+      with the goal added to CHS (it's assumed true)
+- [ ] In `print-chs`: include abducible atoms in the printed answer set
+
+**12d — `solve-forall` correctness**
+
+The current `solve-forall` marks V non-bindable and checks constraints after.
+Edge cases not yet covered:
+- [ ] forall with arithmetic constraints (V gets a numeric constraint set)
+- [ ] forall where goal fails immediately (should succeed — vacuous truth)
+- [ ] nested forall
+
+---
+
+## How to run tests
+
+```
+clj -X:test :nses '[scasp.vars-test scasp.unify-test scasp.solver-test scasp.main-test]'
+```
+
+29 tests, 54 assertions, 0 failures.
 
 ---
 
@@ -488,14 +514,20 @@ Priority examples (increasing difficulty):
    rule must be renamed to fresh names. Failure to do this = variable capture =
    wrong answers.
 
-2. **CHS remove-before-add pattern**: When expanding a call, the solver adds it
-   to CHS with `success=false` first, expands, then REMOVES that entry and adds
-   it back with `success=true`. If you skip the remove, stale entries corrupt the
-   coinductive check.
+2. **CHS remove-before-add pattern**: `expand-call` adds the goal to CHS with
+   `success=false`, expands all rules, then removes that entry and re-adds with
+   `success=true`. Skipping the remove leaves stale entries that corrupt future
+   coinductive checks.
 
-3. **Even loop variable substitution**: When an even loop is detected, loop
-   variables need to be replaced with fresh substitution variables in the CHS
-   entry. This ensures future coinductive checks work correctly.
+3. **`coinductive-failure?` only on `success? false` entries**: The dual of a
+   functor should coinductively succeed only when the positive is currently being
+   proved (`success? false`) on this branch — i.e., an actual OLON loop. A
+   `success? true` entry means the positive finished earlier; that must not
+   trigger coinductive success for the dual (fixed 2026-06-05).
+
+4. **Even loop variable substitution**: When an even loop is detected, loop
+   variables should be replaced with fresh substitution variables in the CHS
+   entry. Currently detected but not substituted (Phase 12b).
 
 4. **NMR check placement**: The NMR check goals must be appended to the query
    (not prepended) and solved AFTER the user goals. The solver tracks `in-nmr?`

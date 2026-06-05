@@ -93,10 +93,14 @@
 ;;; ── Coinductive failure (negation in CHS) ────────────────────────────────────
 
 (defn- coinductive-failure?
-  "True if the negation of functor/args is present in CHS as an exact match."
+  "True if the negation of functor/args is present in CHS with success=false
+   (i.e., currently being proven on this branch — OLON constructive coinduction).
+   A success=true entry means the positive already completed elsewhere; that is
+   not a loop and must not trigger coinductive success for the dual."
   [functor args ve chs]
   (let [neg-f (term/negate-functor functor)
-        neg-entries (entries-for neg-f chs)]
+        ;; Only entries that are still being proven (success? false) on this branch
+        neg-entries (filter #(not (:success? %)) (entries-for neg-f chs))]
     (boolean (exact-match args neg-entries ve))))
 
 ;;; ── Constructive coinductive failure ─────────────────────────────────────────

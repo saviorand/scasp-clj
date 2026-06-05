@@ -1,51 +1,35 @@
 (ns scasp.main
-  "CLI entry point for scasp-clj.
+  "Programmatic API for scasp-clj.
 
-   Usage:
-     clj -M -m scasp.main [options] <file.pl>
+   Build programs from Clojure data, run queries, inspect results.
+   No parser — programs are constructed directly as Clojure maps.
 
-   Options:
-     -n <N>         Find N answer sets (default: 1; 0 = all)
-     --tree         Print justification tree
-     --quiet        Suppress answer set output (just count)
-     --code         Print compiled program (after duals + NMR)"
-  (:require [scasp.parser  :as parser]
-            [scasp.duals   :as duals]
+   Term representation:
+     Atoms:     keywords   :foo
+     Variables: strings    \"X\", \"_\"
+     Compounds: maps       {:op :bird :args [:tweety]}
+     NAF:       maps       {:op :not  :args [inner-goal]}
+     Numbers:   Clojure    42, 3.14
+
+   Quick start:
+     (def rules [(prog/make-rule {:op :bird :args [:tweety]} [])
+                 (prog/make-rule {:op :flies :args [\"X\"]}
+                                 [{:op :bird :args [\"X\"]}
+                                  {:op :not  :args [{:op :ab :args [\"X\"]}]}])])
+     (solve-all rules [{:op :flies :args [\"X\"]}])"
+  (:require [scasp.duals   :as duals]
             [scasp.nmr     :as nmr]
             [scasp.solver  :as solver]
             [scasp.output  :as output]
             [scasp.program :as prog]
             [scasp.vars    :as vars]
-            [clojure.string :as str])
-  (:gen-class))
-
-;;; ── Option parsing ───────────────────────────────────────────────────────────
-
-(defn- parse-opts
-  "Parse CLI args, returning {:file … :n … :tree? … :quiet? … :code? …}."
-  [args]
-  (loop [args args opts {:n 1 :tree? false :quiet? false :code? false :file nil}]
-    (cond
-      (empty? args) opts
-
-      (= (first args) "-n")
-      (recur (drop 2 args) (assoc opts :n (Integer/parseInt (second args))))
-
-      (= (first args) "--tree")
-      (recur (rest args) (assoc opts :tree? true))
-
-      (= (first args) "--quiet")
-      (recur (rest args) (assoc opts :quiet? true))
-
-      (= (first args) "--code")
-      (recur (rest args) (assoc opts :code? true))
-
-      :else
-      (recur (rest args) (assoc opts :file (first args))))))
+            [clojure.string :as str]))
 
 ;;; ── Program printing ─────────────────────────────────────────────────────────
 
-(defn- print-program [program]
+(defn print-program
+  "Print a compiled program to stdout (useful for debugging dual/NMR output)."
+  [program]
   (println "\n;; === Compiled Program ===")
   (doseq [[f rules] (:rules program)]
     (doseq [{:keys [head body]} rules]
@@ -57,58 +41,53 @@
                                 (map #(output/fmt-term % (vars/new-var-env)) body))
                       "."))))))
 
-;;; ── Load + compile pipeline ──────────────────────────────────────────────────
+;;; ── Programmatic API ─────────────────────────────────────────────────────────
 
-(defn load-program
-  "Parse, compile duals, generate NMR check.  Returns ready program."
-  [source]
-  (-> source
-      parser/parse-program
-      duals/compile-duals
-      nmr/generate-nmr-check))
+(defn build-program
+  "Build a compiled program from Clojure data structures.
+   rules: seq of {:head <term> :body [<goal>...]} maps (use prog/make-rule)
+   query: seq of goal terms
+   Returns a program map ready for solve/run-query."
+  [rules query]
+  (let [p0 (reduce (fn [p rule] (prog/assert-rule rule p))
+                   (prog/new-program)
+                   rules)
+        p1 (prog/set-query query p0)]
+    (-> p1 duals/compile-duals nmr/generate-nmr-check)))
 
-(defn load-file
-  [path]
-  (load-program (slurp path)))
+(defn solve
+  "Solve a query against a set of rules.
+   rules: seq of {:head <term> :body [<goal>...]} maps
+   query: seq of goal terms
+   Returns a lazy seq of result maps {:var-env :chs :just :even-loops}."
+  [rules query]
+  (solver/run-query (build-program rules query)))
 
-;;; ── Run and print results ────────────────────────────────────────────────────
+(defn solve-n
+  "Return up to n answer sets as a lazy seq."
+  [n rules query]
+  (take n (solve rules query)))
 
-(defn run
-  "Run the program and print up to n answer sets."
-  [program opts]
-  (let [n       (:n opts)
-        query   (prog/defined-query program)
-        results (solver/run-query program)
-        results' (if (pos? n) (take n results) results)]
-    (if (seq results')
-      (do
-        (doseq [[idx r] (map-indexed #(vector (inc %1) %2) results')]
-          (when-not (:quiet? opts)
-            (output/print-answer idx r query {:tree (:tree? opts)}))))
-      (println "false."))))
+(defn solve-all
+  "Return all answer sets as a vector.
+   Warning: may not terminate for programs with infinitely many answer sets."
+  [rules query]
+  (into [] (solve rules query)))
 
-;;; ── Main ─────────────────────────────────────────────────────────────────────
+;;; ── Result helpers ───────────────────────────────────────────────────────────
 
-(defn -main [& args]
-  (let [opts (parse-opts args)]
-    (when-not (:file opts)
-      (println "Usage: scasp [options] <file.pl>")
-      (println "  -n <N>    Number of answer sets (0=all, default 1)")
-      (println "  --tree    Show justification tree")
-      (println "  --quiet   Suppress output, just count")
-      (println "  --code    Print compiled program")
-      (System/exit 1))
-    (try
-      (let [program (load-file (:file opts))]
-        (when (:code? opts)
-          (print-program program))
-        (run program opts))
-      (catch clojure.lang.ExceptionInfo e
-        (binding [*out* *err*]
-          (println "Error:" (.getMessage e))
-          (println "Details:" (ex-data e)))
-        (System/exit 2))
-      (catch Exception e
-        (binding [*out* *err*]
-          (.printStackTrace e))
-        (System/exit 2)))))
+(defn result-bindings
+  "Extract variable bindings from a result map.
+   var-names: seq of query variable name strings (e.g. [\"X\" \"Y\"])
+   Returns a map {\"X\" <value>, \"Y\" <value>} with values filled in."
+  [result var-names]
+  (let [ve (:var-env result)]
+    (into {} (map (fn [v] [v (vars/fill-in v ve)]) var-names))))
+
+(defn print-results
+  "Print answer sets to stdout. query-goals used to extract variable names."
+  [results query-goals]
+  (if (seq results)
+    (doseq [[idx r] (map-indexed #(vector (inc %1) %2) results)]
+      (output/print-answer idx r query-goals {}))
+    (println "false.")))
