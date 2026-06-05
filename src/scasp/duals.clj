@@ -23,6 +23,10 @@
   "Negate a single goal for use in a dual clause body."
   [g]
   (cond
+    (term/is-sneg? g)
+    ;; not(-p(X)) → p(X) (strong neg negated = positive)
+    (first (:args g))
+
     (term/is-naf? g)
     ;; not(not(X)) → X
     (first (:args g))

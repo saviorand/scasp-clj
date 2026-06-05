@@ -12,6 +12,8 @@
       :body [goal …]}"
   (:require [scasp.term :as term]))
 
+(declare var-list)
+
 ;;; ── Construction ─────────────────────────────────────────────────────────────
 
 (defn new-program []
@@ -20,22 +22,26 @@
 ;;; ── Functor helpers ──────────────────────────────────────────────────────────
 
 (defn goal-functor
-  "Return the functor string for a goal (compound or NAF-wrapped compound)."
+  "Return the functor string for a goal (compound, NAF-wrapped, or sneg-wrapped)."
   [goal]
   (cond
     (term/is-naf? goal)
     (let [inner (first (:args goal))]
       (term/negate-functor (term/term-functor inner)))
+    (term/is-sneg? goal)
+    (let [inner (first (:args goal))]
+      (term/strong-negate-functor (term/term-functor inner)))
     (term/is-compound? goal)
     (term/term-functor goal)
     :else nil))
 
 (defn predicate-of
-  "Return the positive functor string for a goal (stripping not if NAF)."
+  "Return the positive functor string for a goal (stripping not/sneg wrapper)."
   [goal]
-  (if (term/is-naf? goal)
-    (term/term-functor (first (:args goal)))
-    (term/term-functor goal)))
+  (cond
+    (term/is-naf? goal)  (term/term-functor (first (:args goal)))
+    (term/is-sneg? goal) (term/strong-negate-functor (term/term-functor (first (:args goal))))
+    :else                (term/term-functor goal)))
 
 ;;; ── Rule operations ──────────────────────────────────────────────────────────
 
@@ -45,12 +51,29 @@
   {:head head :body (vec body)})
 
 (defn assert-rule
-  "Add a rule to the program, indexed by head functor."
+  "Add a rule to the program, indexed by head functor.
+   When the head is a strongly-negated predicate (-p/N), automatically
+   registers a consistency _false/0 rule (:- p(X), -p(X)) the first time
+   any -p/N rule is asserted, ensuring p and -p cannot both hold."
   [rule prog]
-  (let [f (term/term-functor (:head rule))]
-    (-> prog
-        (update-in [:rules f] (fnil conj []) rule)
-        (update :predicates conj f))))
+  (let [f    (term/term-functor (:head rule))
+        prog' (-> prog
+                  (update-in [:rules f] (fnil conj []) rule)
+                  (update :predicates conj f))]
+    (if (and (term/is-strong-neg? f)
+             (not (contains? (:strong-neg-constrained prog) f)))
+      ;; First rule for -p/N: auto-add the consistency constraint :- p(X…), -p(X…)
+      (let [n          (term/functor-arity f)
+            pos-name   (term/functor-name-str (term/strong-negate-functor f))
+            vars       (var-list n)
+            pos-goal   (term/make-compound pos-name vars)
+            neg-goal   (term/make-compound (term/functor-name-str f) vars)
+            false-head {:op :_false :args []}
+            cons-rule  {:head false-head :body [pos-goal neg-goal]}]
+        (-> prog'
+            (update-in [:rules "_false/0"] (fnil conj []) cons-rule)
+            (update :strong-neg-constrained (fnil conj #{}) f)))
+      prog')))
 
 (defn retract-rule
   "Remove first rule matching pred from the program."

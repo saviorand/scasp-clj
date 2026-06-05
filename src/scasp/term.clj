@@ -31,6 +31,12 @@
   [t]
   (and (is-compound? t) (= (:op t) :not) (= (count (:args t)) 1)))
 
+(defn is-sneg?
+  "Strong negation goal: {:op :sneg :args [inner]}.
+   Represents classical/explicit negation -p(X)."
+  [t]
+  (and (is-compound? t) (= (:op t) :sneg) (= (count (:args t)) 1)))
+
 (defn is-forall?
   "Forall goal: {:op :forall :args [var-string goal]}."
   [t]
@@ -76,11 +82,27 @@
       (str "not_" n "/" ar))))
 
 (defn is-dual?
-  "True if the functor string starts with 'not_' or '_not_' (inner dual)."
+  "True if the functor string starts with 'not_' or '_not_' (inner dual).
+   Strong negation '-foo' is NOT a dual — it is a regular predicate."
   [^String f]
   (let [n (functor-name-str f)]
     (or (str/starts-with? n "not_")
         (str/starts-with? n "_not_"))))
+
+(defn is-strong-neg?
+  "True if the functor string represents a strongly-negated predicate ('-foo/1')."
+  [^String f]
+  (str/starts-with? (functor-name-str f) "-"))
+
+(defn strong-negate-functor
+  "Flip between positive and strongly-negated functor strings.
+   'foo/1' ↔ '-foo/1'"
+  [^String f]
+  (let [n  (functor-name-str f)
+        ar (subs f (inc (.lastIndexOf f "/")))]
+    (if (str/starts-with? n "-")
+      (str (subs n 1) "/" ar)
+      (str "-" n "/" ar))))
 
 (defn reserved-functor?
   "True if the functor's name starts with '_' (internal/reserved)."
@@ -214,6 +236,7 @@
     (is-var? t)      t
     (is-atom? t)     (name t)
     (is-number? t)   (str t)
+    (is-sneg? t)     (str "-" (pp-term (first (:args t))))
     (is-naf? t)      (str "not " (pp-term (first (:args t))))
     (is-forall? t)   (str "forall(" (pp-term (first (:args t))) ", " (pp-term (second (:args t))) ")")
     (is-compound? t) (str (name (:op t)) (pp-args (:args t)))

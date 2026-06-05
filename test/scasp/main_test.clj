@@ -4,6 +4,7 @@
   (:require [clojure.test :refer [deftest is]]
             [scasp.main    :as main]
             [scasp.program :as prog]
+            [scasp.term    :as term]
             [scasp.vars    :as vars]))
 
 ;;; ── Helpers ──────────────────────────────────────────────────────────────────
@@ -179,6 +180,62 @@
   (let [rules [(r (c :p) {:op :forall :args ["X" (c :q "X")]})]
         results (main/solve-all rules [(c :p)])]
     (is (seq results))))
+
+;;; ── Strong negation ──────────────────────────────────────────────────────────
+
+(defn- sneg [g] {:op :sneg :args [g]})
+
+(deftest strong-negation-basic-test
+  ;; flies(X) :- bird(X), not ab(X).
+  ;; -flies(X) :- ab(X).
+  ;; bird(tweety). bird(sam). ab(sam).
+  ;; Consistency: :- flies(X), -flies(X).  (auto-generated)
+  ;; ?- flies(X).  → only tweety (sam is ab → -flies(sam), consistency blocks flies(sam))
+  (let [rules [(r (c :flies "X")    (c :bird "X") (naf (c :ab "X")))
+               (r (term/make-compound "-flies" ["X"]) (c :ab "X"))
+               (r (c :bird :tweety))
+               (r (c :bird :sam))
+               (r (c :ab :sam))]
+        results (main/solve-all rules [(c :flies "X")])
+        x-vals  (set (map #(vars/var-value "X" (:var-env %)) results))]
+    (is (= 1 (count results)))
+    (is (contains? x-vals {:val :tweety}))))
+
+(deftest strong-negation-query-neg-test
+  ;; Same program as above.
+  ;; ?- -flies(X).  → only sam
+  (let [rules [(r (c :flies "X")    (c :bird "X") (naf (c :ab "X")))
+               (r (term/make-compound "-flies" ["X"]) (c :ab "X"))
+               (r (c :bird :tweety))
+               (r (c :bird :sam))
+               (r (c :ab :sam))]
+        results (main/solve-all rules [(sneg (c :flies "X"))])
+        x-vals  (set (map #(vars/var-value "X" (:var-env %)) results))]
+    (is (= 1 (count results)))
+    (is (contains? x-vals {:val :sam}))))
+
+(deftest strong-negation-consistency-test
+  ;; Consistency: asserting both p(a) and -p(a) directly should yield 0 answers.
+  ;; p(a). -p(a).  :- p(X), -p(X).  (auto-generated)
+  ;; ?- p(X).
+  (let [rules [(r (c :p :a))
+               (r (term/make-compound "-p" [:a]))]
+        results (main/solve-all rules [(c :p "X")])]
+    (is (= 0 (count results)))))
+
+(deftest strong-negation-naf-vs-strong-test
+  ;; not p(X) (NAF) and -p(X) (strong negation) are distinct.
+  ;; -p(a) is explicitly asserted; p(b) is a fact.
+  ;; ?- p(X)      should give X=b only
+  ;; ?- sneg(p(X)) should give X=a only
+  (let [rules [(r (c :p :b))
+               (r (term/make-compound "-p" [:a]))]
+        pos-results (main/solve-all rules [(c :p "X")])
+        neg-results (main/solve-all rules [(sneg (c :p "X"))])]
+    (is (= 1 (count pos-results)))
+    (is (= {:val :b} (vars/var-value "X" (:var-env (first pos-results)))))
+    (is (= 1 (count neg-results)))
+    (is (= {:val :a} (vars/var-value "X" (:var-env (first neg-results)))))))
 
 ;;; ── match-neg constraint propagation ────────────────────────────────────────
 

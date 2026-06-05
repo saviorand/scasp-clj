@@ -226,17 +226,25 @@
 ;;; ── Predicate solver ─────────────────────────────────────────────────────────
 
 (defn solve-predicate
-  "Solve a predicate goal (positive or NAF-wrapped)."
+  "Solve a predicate goal (positive, NAF-wrapped, or strong-negation)."
   [goal ve chs call-stack in-nmr? even-loops program]
   (let [[functor args]
-        (if (term/is-naf? goal)
+        (cond
+          (term/is-naf? goal)
           (let [inner (first (:args goal))]
             [(term/negate-functor (term/term-functor inner)) (:args inner)])
+          (term/is-sneg? goal)
+          (let [inner (first (:args goal))]
+            [(term/strong-negate-functor (term/term-functor inner)) (:args inner)])
+          :else
           [(term/term-functor goal) (:args goal)])
         effective-goal
-        (if (term/is-naf? goal)
+        (cond
+          (term/is-naf? goal)
           (term/make-compound (term/functor-name-str functor) args)
-          goal)]
+          (term/is-sneg? goal)
+          (term/make-compound (term/functor-name-str functor) args)
+          :else goal)]
     (lazy-seq
       (mapcat
         (fn [{:keys [result var-env even-loop]}]
