@@ -58,6 +58,30 @@
         results (main/solve-all rules [(naf (c :p))])]
     (is (seq results))))
 
+;;; ── Integrity constraints ────────────────────────────────────────────────────
+
+(deftest integrity-constraint-test
+  ;; Program:  a(1). a(2). a(3).
+  ;;           :- a(1), a(2).   -- ground constraint: 1 and 2 cannot both hold
+  ;;           (this constraint always fires, so NO answer should be produced)
+  ;; ?- a(X).
+  ;; Without the constraint: 3 answers (X=1, X=2, X=3).
+  ;; With    the constraint: 0 answers (constraint body has no variables, so
+  ;;   the dual has no forall; it directly checks not_a(1) or a(1),not_a(2),
+  ;;   both fail since a(1) and a(2) are facts, so not__chk_0_1 fails = constraint fires).
+  (let [false-head {:op :_false :args []}
+        rules [(r (c :a 1))
+               (r (c :a 2))
+               (r (c :a 3))
+               {:head false-head :body [(c :a 1) (c :a 2)]}]
+        ;; Without constraint: 3 results
+        results-no-c (main/solve-all [(r (c :a 1)) (r (c :a 2)) (r (c :a 3))]
+                                     [(c :a "X")])
+        ;; With constraint: 0 results (constraint always fires)
+        results-with-c (main/solve-all rules [(c :a "X")])]
+    (is (= 3 (count results-no-c)))
+    (is (= 0 (count results-with-c)))))
+
 ;;; ── solve-n — result-count limiting ─────────────────────────────────────────
 
 (deftest solve-n-test

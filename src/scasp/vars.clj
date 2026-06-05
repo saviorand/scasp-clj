@@ -99,12 +99,11 @@
 
 (defn add-var-constraint
   "Add forbidden value c to var-name's constraint set.
-   Returns updated ve or nil if variable is not bindable / already bound."
+   Returns updated ve or nil if variable is already bound."
   [var-name c ve]
   (when-let [cs (is-unbound? var-name ve)]
-    (when (:bindable? cs)
-      (let [new-cs (update cs :constraints conj c)]
-        (update-var-value var-name new-cs ve)))))
+    (let [new-cs (update cs :constraints conj c)]
+      (update-var-value var-name new-cs ve))))
 
 ;;; ── Union-find: unify two variables ─────────────────────────────────────────
 
