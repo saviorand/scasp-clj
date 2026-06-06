@@ -1,0 +1,120 @@
+(load-file "fold.clj")
+
+(ns inference
+  "Port of inference.pl — unified deduction / abduction / induction
+   over an ontology list, using scasp-clj and the FOLD-R algorithm."
+  (:require [scasp.main    :as main]
+            [scasp.program :as prog]
+            [scasp.vars    :as vars]))
+
+;;; ── Term helpers ─────────────────────────────────────────────────────────────
+
+(defn- c [op & args] {:op op :args (vec args)})
+(defn- r [head & body] (prog/make-rule head (vec body)))
+
+;;; ── Ontology helpers matching inference.pl ───────────────────────────────────
+
+(defn- rule? [t] (contains? t :head))
+
+(defn- term->rule
+  "create_background: bare term map becomes a fact (rule with empty body)."
+  [t]
+  (if (rule? t) t (r t)))
+
+(defn- extract-pos-neg
+  "extract_pos_neg: pull positive(X) / negative(X) markers from ontology."
+  [ontology]
+  {:pos (into [] (keep #(when (= (:op %) :positive) (first (:args %))) ontology))
+   :neg (into [] (keep #(when (= (:op %) :negative) (first (:args %))) ontology))})
+
+(defn- extract-predicates
+  "extract_predicates: all unique pred keywords except positive, negative, goal-kw."
+  [ontology goal-kw]
+  (->> ontology
+       (map :op)
+       (remove nil?)
+       (remove #{:positive :negative goal-kw})
+       distinct
+       vec))
+
+;;; ── inference/2 and inference/3 ──────────────────────────────────────────────
+
+(defn inference
+  "Unified inference matching inference.pl.
+
+   (inference ontology goal-term)            ; deduction (default)
+   (inference :deduction  ontology goal)     ; explicit deduction
+   (inference :abduction  ontology goal)     ; abduction
+   (inference :induction  ontology goal-kw)  ; induction via FOLD-R"
+  ([ontology goal]
+   (inference :deduction ontology goal))
+  ([mode ontology goal]
+   (case mode
+     :deduction
+     (let [rules (mapv term->rule ontology)]
+       (main/solve-all rules [goal]))
+
+     :abduction
+     (let [rules   (mapv term->rule ontology)
+           prog    (main/build-program rules [goal])
+           defined (set (keys (:rules prog)))
+           ;; Collect body goals from all rules — these are the calls that
+           ;; may have no definition, making them abducible.
+           body-goals (mapcat :body rules)
+           abducibles (into #{}
+                            (comp (map #(when (map? %)
+                                          (str (name (:op %)) "/" (count (:args %)))))
+                                  (remove nil?)
+                                  (remove #(contains? defined %)))
+                            body-goals)]
+       (main/solve-all rules [goal] abducibles))
+
+     :induction
+     ;; goal here is a keyword (target predicate name), matching fold/8 signature
+     (let [{:keys [pos neg]} (extract-pos-neg ontology)
+           predicates        (extract-predicates ontology goal)
+           background        (fold/propositionalize (mapv term->rule ontology))
+           result            (fold/induce goal pos neg background predicates)]
+       result))))
+
+;;; ── Beans example ─────────────────────────────────────────────────────────────
+
+(println "\n=== Deduction ===")
+;; white(B) :- from(B, s1).  from(b1, s1).  ?- white(X).
+(let [results (inference
+               [(r (c :white "B") (c :from "B" :s1))
+                (c :sack :s1)
+                (c :bean :b1)
+                (c :from :b1 :s1)]
+               (c :white "X"))]
+  (if (seq results)
+    (doseq [res results]
+      (println "white(X) where X =" (vars/fill-in "X" (:var-env res))))
+    (println "false.")))
+
+(println "\n=== Abduction ===")
+;; white(X) :- from(X, s1).  #abducible from/2.  ?- white(b1).
+(let [results (inference
+               :abduction
+               [(r (c :white "X") (c :from "X" :s1))]
+               (c :white :b1))]
+  (if (seq results)
+    (doseq [res results]
+      (println "Abduced (CHS):" (:chs res)))
+    (println "false.")))
+
+(println "\n=== Induction ===")
+;; positive(b1).  bean(b1).  from_s1(b1).  ?- white.
+(let [result (inference
+              :induction
+              [(c :sack :s1)
+               (c :bean :b1)
+               (c :from-s1 :b1)
+               (c :positive :b1)]
+              :white)]
+  (println "Positive rules:")
+  (doseq [rule (:positive-rules result)]
+    (println " " rule))
+  (println "Exception rules:")
+  (doseq [rule (:exception-rules result)]
+    (println " " rule)))
