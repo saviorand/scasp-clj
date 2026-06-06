@@ -1,4 +1,4 @@
-(ns fold
+(ns scasp.fold
   "FOLD-R ILP algorithm — pure Clojure port of tools/code-tool/scasp/fold.pl.
 
    Learns defeasible Horn clauses from positive/negative examples and
@@ -30,7 +30,7 @@
 
 ;;; ── Coverage ──────────────────────────────────────────────────────────────────
 
-(defn- satisfies?
+(defn- covered-by?
   "True when example satisfies every literal in body against background.
    Handles three literal forms:
      {:op :pred ...}                   — plain fact lookup
@@ -49,12 +49,12 @@
 (defn- covered
   "Examples whose body is satisfied by the clause."
   [{:keys [body]} examples background]
-  (filterv #(satisfies? body % background) examples))
+  (filterv #(covered-by? body % background) examples))
 
 (defn- uncovered
   "Examples whose body is NOT satisfied by the clause."
   [{:keys [body]} examples background]
-  (filterv #(not (satisfies? body % background)) examples))
+  (filterv #(not (covered-by? body % background)) examples))
 
 ;;; ── Information gain ──────────────────────────────────────────────────────────
 
@@ -108,14 +108,16 @@
               (let [candidate (add-literal clause pred-kw true)
                     gain      (compute-gain candidate pos neg base-info background)]
                 (cond
-                  (> gain best-ig)              [pred-kw gain]
+                  (> gain best-ig)
+                  [pred-kw gain]
                   ;; On tie, new literal wins unless current best has fewer body vars.
                   ;; Matches choose_tie_clause in fold.pl: last tie wins when var counts equal.
                   (and (>= gain 0.0) (= gain best-ig))
-                  (let [cur-vars  (count (filter string? (mapcat :args (:body (add-literal clause best-kw true)))))
-                        new-vars  (count (filter string? (mapcat :args (:body candidate))))]
+                  (let [cur-vars (count (filter string? (mapcat :args (:body (add-literal clause best-kw true)))))
+                        new-vars (count (filter string? (mapcat :args (:body candidate))))]
                     (if (< cur-vars new-vars) [best-kw best-ig] [pred-kw gain]))
-                  :else                         [best-kw best-ig])))
+                  :else
+                  [best-kw best-ig])))
             [nil -1.0]
             predicates)))
 
@@ -124,12 +126,11 @@
 (defn- materialise
   "Evaluate rules against background and extend background with the head
    predicate's coverage. Used after learning exception rules so that
-   subsequent (not ab_N(X)) evaluations resolve correctly.
-   Argument order matches (update state :bg materialise rules all-examples)."
+   subsequent (not ab_N(X)) evaluations resolve correctly."
   [background rules all-examples]
   (reduce (fn [bg rule]
             (let [head-kw       (get-in rule [:head :op])
-                  newly-covered (into #{} (filter #(satisfies? (:body rule) % bg) all-examples))]
+                  newly-covered (into #{} (filter #(covered-by? (:body rule) % bg) all-examples))]
               (update bg head-kw (fnil into #{}) newly-covered)))
           background
           rules))
@@ -149,26 +150,15 @@
 
 (defn- exception
   "Attempt to learn an exception predicate ab_N when the current clause
-   still covers some negative examples.
-
-   neg-as-pos: covered negatives — these become the exception's positive examples
-   pos-as-neg: remaining positives — constrain the exception (do not over-generalise)
-
-   On success:
-     - Runs fold-loop to learn ab_N rules from neg-as-pos vs pos-as-neg.
-     - Materialises the ab_N coverage into state :bg so NAF resolves correctly.
-     - Returns [updated-clause state] with (not ab_N(X)) appended to the body.
-   On failure (no distinguishing literal): returns [nil state]."
+   still covers some negative examples."
   [clause neg-as-pos pos-as-neg predicates state]
-  (let [bg         (:bg state)
+  (let [bg          (:bg state)
         [_ best-ig] (best-literal clause neg-as-pos pos-as-neg predicates bg)]
     (if (>= best-ig 0.0)
       (let [n-ab      (:n-ab state)
             ab-kw     (keyword (str "ab" n-ab))
             state1    (update state :n-ab inc)
             [ab-rules state2] (fold-loop ab-kw neg-as-pos pos-as-neg predicates state1)
-            ;; Materialise ab_N rules into background so satisfies? can evaluate
-            ;; (not ab_N(X)) in subsequent coverage checks.
             all-ex    (into #{} (concat neg-as-pos pos-as-neg))
             state3    (-> state2
                           (update :ab into ab-rules)
@@ -178,16 +168,7 @@
       [nil state])))
 
 (defn- specialize
-  "Iteratively add literals to clause until no negative examples remain covered.
-
-   Tries three strategies in order:
-     1. Add the literal with the highest information gain (removes it from
-        the candidate set so it cannot be reused in this clause chain).
-     2. just-started? true  → enumerate: hardcode a specific positive example.
-     3. just-started? false → exception: generate an ab_N predicate. Falls
-        back to enumerate if no distinguishing literal exists.
-
-   Returns [specialised-clause remaining-predicates state]."
+  "Iteratively add literals to clause until no negative examples remain covered."
   [clause pos neg predicates state just-started?]
   (let [bg (:bg state)
         [best-kw best-ig] (best-literal clause pos neg predicates bg)
@@ -205,7 +186,6 @@
           (let [[exc-clause exc-state] (exception clause neg pos predicates state)]
             [(or exc-clause (enumerate clause pos)) predicates (or exc-state state)]))
 
-        ;; Use updated :bg from state1 — may include newly materialised ab_N facts.
         bg1           (:bg state1)
         neg-remaining (covered new-clause neg bg1)]
     (if (empty? neg-remaining)
@@ -216,11 +196,7 @@
                   new-preds state1 false))))
 
 (defn- fold-loop
-  "Iteratively specialise until all positive examples are covered.
-   Passes the (potentially reduced) predicate set across iterations so that
-   predicates used in earlier clauses are not reused in later ones.
-
-   Returns [learned-rules state]."
+  "Iteratively specialise until all positive examples are covered."
   [goal-kw pos neg predicates state]
   (if (empty? pos)
     [[] state]
@@ -267,21 +243,20 @@
 ;;; ── Propositionalization helper ───────────────────────────────────────────────
 
 (defn propositionalize
-  "Convert a seq of scasp-clj ground facts (rules with empty :body) into the
-   {pred-kw #{example-kw}} background map required by induce.
+  "Convert a seq of scasp-clj ground facts into the {pred-kw #{example-kw}}
+   background map required by induce.
 
-   Unary  {:head {:op :bean  :args [:b1]}      :body []} → {:bean #{:b1}}
-   Binary {:head {:op :from  :args [:b1 :s1]}  :body []} → {:from_s1 #{:b1}}
-   Arity ≥ 3 facts are dropped.
+   Unary  {:op :bean :args [:b1]}         → {:bean #{:b1}}
+   Binary {:op :from :args [:b1 :s1]}     → {:from_s1 #{:b1}}
+   Arity ≥ 3 or variable args are skipped.
 
-   Also accepts bare term maps {:op :pred :args [...]} without a :head wrapper."
+   Also accepts rule maps {:head term :body []} — the :head is unwrapped."
   [facts]
   (reduce
    (fn [bg fact]
      (let [term (if (contains? fact :head) (:head fact) fact)
            op   (:op term)
            args (:args term)]
-       ;; Skip terms with variable args (strings) — they are type hints, not ground facts.
        (if (some string? args)
          bg
          (case (count args)
