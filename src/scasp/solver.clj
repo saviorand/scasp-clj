@@ -33,8 +33,9 @@
 
 (defn- resolve-arith
   "Try to evaluate t as a ground arithmetic value.
-   Returns the number, or ::unbound with the var name if t reduces to an unbound var,
-   or throws if t contains a non-numeric compound with unbound inner vars."
+   Returns the number, or [::unbound var-name] if t reduces to a single unbound var,
+   or [::linear coeff var-name offset] for affine expressions (coeff*var + offset),
+   or throws for non-linear or otherwise unevaluable expressions."
   [t ve]
   (cond
     (number? t) t
@@ -48,11 +49,12 @@
           a1  (first  (:args t))
           a2  (second (:args t))
           r1  (when a1 (resolve-arith a1 ve))
-          r2  (when a2 (resolve-arith a2 ve))]
-      (if (or (and (vector? r1) (= (first r1) ::unbound))
-              (and (vector? r2) (= (first r2) ::unbound)))
-        (throw (ex-info "Compound expression with unbound variable"
-                        {:term t :r1 r1 :r2 r2}))
+          r2  (when a2 (resolve-arith a2 ve))
+          lin? (fn [r] (and (vector? r) (= (first r) ::linear)))
+          unb? (fn [r] (and (vector? r) (= (first r) ::unbound)))]
+      (cond
+        ;; Both ground — evaluate directly
+        (and (number? r1) (number? r2))
         (let [va r1 vb r2]
           (cond
             (= op :+)    (+ va vb)
@@ -71,7 +73,42 @@
             (= op :min)  (min va vb)
             (= op :float)   (double va)
             (= op :integer) (long va)
-            :else (throw (ex-info "Unknown arithmetic operator" {:op op}))))))
+            :else (throw (ex-info "Unknown arithmetic operator" {:op op}))))
+
+        ;; Unary ground case (abs/float/integer/unary minus)
+        (and (number? r1) (nil? r2))
+        (case op
+          :abs     (Math/abs (double r1))
+          :float   (double r1)
+          :integer (long r1)
+          :- (- r1)
+          (throw (ex-info "Unknown unary operator" {:op op})))
+
+        ;; Affine: var + number  /  number + var
+        (and (unb? r1) (number? r2) (= op :+)) [::linear 1 (second r1) r2]
+        (and (number? r1) (unb? r2) (= op :+)) [::linear 1 (second r2) r1]
+        ;; var - number
+        (and (unb? r1) (number? r2) (= op :-)) [::linear 1 (second r1) (- r2)]
+        ;; number - var  →  -1*var + number
+        (and (number? r1) (unb? r2) (= op :-)) [::linear -1 (second r2) r1]
+        ;; number * var  /  var * number
+        (and (number? r1) (unb? r2) (= op :*)) [::linear r1 (second r2) 0]
+        (and (unb? r1) (number? r2) (= op :*)) [::linear r2 (second r1) 0]
+        ;; linear + number  /  number + linear
+        (and (lin? r1) (number? r2) (= op :+))
+        (let [[_ c v k] r1] [::linear c v (+ k r2)])
+        (and (number? r1) (lin? r2) (= op :+))
+        (let [[_ c v k] r2] [::linear c v (+ r1 k)])
+        ;; linear - number
+        (and (lin? r1) (number? r2) (= op :-))
+        (let [[_ c v k] r1] [::linear c v (- k r2)])
+        ;; number * linear
+        (and (number? r1) (lin? r2) (= op :*))
+        (let [[_ c v k] r2] [::linear (* r1 c) v (* r1 k)])
+        (and (lin? r1) (number? r2) (= op :*))
+        (let [[_ c v k] r1] [::linear (* c r2) v (* k r2)])
+
+        :else (throw (ex-info "Non-linear or unevaluable expression" {:term t :r1 r1 :r2 r2}))))
     :else (throw (ex-info "Non-numeric term in arithmetic" {:term t}))))
 
 (defn- unbound-var?
@@ -160,16 +197,20 @@
               (when-let [ve' (unify/solve-dnunify (first args) (second args) ve)]
                 ve')
               (= op :is)
-              (let [r2 (try (resolve-arith (second args) ve)
-                            (catch clojure.lang.ExceptionInfo _ nil))]
+              (let [lhs (first args)
+                    r2  (try (resolve-arith (second args) ve)
+                             (catch clojure.lang.ExceptionInfo _ nil))]
                 (cond
                   (number? r2)
-                  (when-let [ve' (unify/solve-unify (first args) r2 ve false)]
+                  (when-let [ve' (unify/solve-unify lhs r2 ve false)]
                     ve')
-                  ;; rhs is a single unbound var → defer as equality constraint
+                  ;; rhs is a single unbound var → defer as equality
                   (and r2 (unbound-var? r2))
-                  (solve-clp-constraint :=:= (first args) (second args) ve)
-                  ;; rhs is a compound with unbound inner vars — cannot defer, soft fail
+                  (solve-clp-constraint :=:= lhs (second args) ve)
+                  ;; rhs is affine: coeff*Y + offset → store linear-eq on X and Y
+                  (and r2 (vector? r2) (= (first r2) ::linear))
+                  (let [[_ coeff y-var offset] r2]
+                    (vars/add-linear-eq lhs coeff y-var offset ve))
                   :else nil))
               (= op :=:=)
               (solve-clp-constraint :=:= (first args) (second args) ve)

@@ -48,35 +48,40 @@
    rules:      seq of {:head <term> :body [<goal>...]} maps (use prog/make-rule)
    query:      seq of goal terms
    abducibles: optional set of functor strings (e.g. #{\"fly/1\"})
+   opts:       optional map — :no-olon true, :no-nmr true
    Returns a program map ready for solve/run-query."
-  ([rules query] (build-program rules query #{}))
-  ([rules query abducibles]
+  ([rules query] (build-program rules query #{} {}))
+  ([rules query abducibles] (build-program rules query abducibles {}))
+  ([rules query abducibles opts]
    (let [p0 (reduce (fn [p rule] (prog/assert-rule rule p))
                     (prog/new-program)
                     rules)
          p1 (prog/set-query query p0)
          p2 (reduce prog/mark-abducible p1 abducibles)]
-     (-> p2 duals/compile-duals nmr/generate-nmr-check))))
+     (-> p2 duals/compile-duals (nmr/generate-nmr-check opts)))))
 
 (defn solve
   "Solve a query against a set of rules.
    rules:      seq of {:head <term> :body [<goal>...]} maps
    query:      seq of goal terms
    abducibles: optional set of functor strings
+   opts:       optional map — :no-olon true, :no-nmr true
    Returns a lazy seq of result maps {:var-env :chs :just :even-loops}."
   ([rules query] (solver/run-query (build-program rules query)))
-  ([rules query abducibles] (solver/run-query (build-program rules query abducibles))))
+  ([rules query abducibles] (solver/run-query (build-program rules query abducibles)))
+  ([rules query abducibles opts] (solver/run-query (build-program rules query abducibles opts))))
 
 (defn solve-n
   "Return up to n answer sets as a lazy seq."
-  [n rules query]
-  (take n (solve rules query)))
+  ([n rules query] (take n (solve rules query)))
+  ([n rules query opts] (take n (solve rules query #{} opts))))
 
 (defn solve-all
   "Return all answer sets as a vector.
    Warning: may not terminate for programs with infinitely many answer sets."
   ([rules query] (into [] (solve rules query)))
-  ([rules query abducibles] (into [] (solve rules query abducibles))))
+  ([rules query abducibles] (into [] (solve rules query abducibles)))
+  ([rules query abducibles opts] (into [] (solve rules query abducibles opts))))
 
 ;;; ── Result helpers ───────────────────────────────────────────────────────────
 

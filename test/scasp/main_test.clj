@@ -254,3 +254,58 @@
     (is (seq results))
     ;; No answer has X=a
     (is (not (some #(= {:val :a} %) x-vals)))))
+
+;;; ── no-olon / no-nmr opts ────────────────────────────────────────────────────
+
+(deftest no-nmr-opt-test
+  ;; p :- not p.  (OLON — normally requires NMR sub-check)
+  ;; With :no-nmr true, NMR goals are skipped entirely.
+  ;; Query: not p.  Should still succeed because the dual not_p succeeds.
+  (let [rules   [(r (c :p) (naf (c :p)))]
+        query   [(naf (c :p))]
+        normal  (main/solve-all rules query)
+        no-nmr  (main/solve-all rules query #{} {:no-nmr true})]
+    ;; Both should return at least one answer
+    (is (seq normal))
+    (is (seq no-nmr))))
+
+(deftest no-olon-opt-test
+  ;; With :no-olon true, OLON detection is skipped and no _chk rules are generated.
+  ;; Simple non-OLON program should still work correctly.
+  (let [rules  [(r (c :bird :tweety))
+                (r (c :flies "X") (c :bird "X"))]
+        normal (main/solve-all rules [(c :flies "X")] #{} {})
+        no-olon (main/solve-all rules [(c :flies "X")] #{} {:no-olon true})]
+    (is (= 1 (count normal)))
+    (is (= 1 (count no-olon)))))
+
+;;; ── is/2 with compound unbound RHS ──────────────────────────────────────────
+
+(deftest is-linear-rhs-test
+  ;; X is Y + 1, then Y is bound to 4 → X should be 5.
+  (let [rules [(r (c :p "X" "Y")
+                  {:op :is :args ["X" {:op :+ :args ["Y" 1]}]}
+                  {:op :is :args ["Y" 4]})]
+        results (main/solve-all rules [(c :p "X" "Y")])
+        bindings (map #(main/result-bindings % ["X" "Y"]) results)]
+    (is (= 1 (count results)))
+    (is (= {"X" 5 "Y" 4} (first bindings)))))
+
+(deftest is-linear-rhs-fail-test
+  ;; X is Y + 1, Y is 4, X is 6 → fails (6 ≠ 4+1).
+  (let [rules [(r (c :p "X" "Y")
+                  {:op :is :args ["X" {:op :+ :args ["Y" 1]}]}
+                  {:op :is :args ["Y" 4]}
+                  {:op :is :args ["X" 6]})]
+        results (main/solve-all rules [(c :p "X" "Y")])]
+    (is (empty? results))))
+
+(deftest is-linear-rhs-lhs-bound-test
+  ;; X is Y + 1, X is 5 (bound first) → Y should be derived as 4.
+  (let [rules [(r (c :p "X" "Y")
+                  {:op :is :args ["X" {:op :+ :args ["Y" 1]}]}
+                  {:op :is :args ["X" 5]})]
+        results (main/solve-all rules [(c :p "X" "Y")])
+        bindings (map #(main/result-bindings % ["X" "Y"]) results)]
+    (is (= 1 (count results)))
+    (is (= {"X" 5 "Y" 4} (first bindings)))))

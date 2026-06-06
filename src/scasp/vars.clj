@@ -213,35 +213,114 @@
     :arith-ne :arith-ne
     nil))
 
+(defn- coerce-int
+  "Return n as a long if it is a whole number, otherwise return it unchanged."
+  [n]
+  (if (and (float? n) (== n (Math/floor n))) (long n) n))
+
+(defn- unify-or-bind
+  "Unify var-name with ground value val.  Returns ve or nil."
+  [var-name val ve]
+  (let [v   (var-value var-name ve)
+        val (if (number? val) (coerce-int val) val)]
+    (if (contains? v :val)
+      (when (== (:val v) val) ve)
+      (when (:bindable? v)
+        (update-var-value var-name {:val val} ve)))))
+
 (defn check-var-constraints
-  "When var-name is being bound to numeric val, check all relational constraints
-   of the form (var-name op other-var) by looking up other-var in ve.
-   If other-var is also bound, evaluate; if unbound, propagate bound onto it.
+  "When var-name is being bound to numeric val, check all var-constraints.
+   Handles both relational (:< :> etc.) and :linear-eq constraints.
    Returns updated ve on success, nil on violation."
   [var-name val ve]
   (if-let [cs (is-unbound? var-name ve)]
-    (reduce (fn [ve' {:keys [op rhs]}]
+    (reduce (fn [ve' {:keys [op rhs] :as c}]
               (when ve'
-                (let [rhs-v (var-value rhs ve')]
-                  (if (contains? rhs-v :val)
-                    ;; rhs is ground — evaluate directly
-                    (let [rv (:val rhs-v)]
-                      (when (number? rv)
-                        (case op
-                          :<       (when (<  val rv) ve')
-                          :>       (when (>  val rv) ve')
-                          :=<      (when (<= val rv) ve')
-                          :>=      (when (>= val rv) ve')
-                          :=:=     (when (== val rv) ve')
-                          :arith-ne (when (not (== val rv)) ve')
-                          ve')))
-                    ;; rhs still unbound — push flipped bound onto it
-                    (if-let [flipped (flip-op op)]
-                      (add-numeric-bound rhs flipped val ve')
-                      ve')))))
+                (if (= op :linear-eq)
+                  ;; X is being bound to val; constraint says X = coeff*rhs + offset
+                  ;; → derive rhs = (val - offset) / coeff and bind/check it
+                  (let [{:keys [coeff offset]} c
+                        rhs-v (var-value rhs ve')]
+                    (if (contains? rhs-v :val)
+                      (when (== val (+ (* coeff (:val rhs-v)) offset)) ve')
+                      (when-not (zero? coeff)
+                        (unify-or-bind rhs (/ (- val offset) coeff) ve'))))
+                  ;; Relational constraint
+                  (let [rhs-v (var-value rhs ve')]
+                    (if (contains? rhs-v :val)
+                      (let [rv (:val rhs-v)]
+                        (when (number? rv)
+                          (case op
+                            :<       (when (<  val rv) ve')
+                            :>       (when (>  val rv) ve')
+                            :=<      (when (<= val rv) ve')
+                            :>=      (when (>= val rv) ve')
+                            :=:=     (when (== val rv) ve')
+                            :arith-ne (when (not (== val rv)) ve')
+                            ve')))
+                      (if-let [flipped (flip-op op)]
+                        (add-numeric-bound rhs flipped val ve')
+                        ve'))))))
             ve
             (:var-constraints cs))
     ve))
+
+;;; ── Linear equality constraints (X is coeff*Y + offset) ─────────────────────
+
+(defn add-linear-eq
+  "Record X = coeff * Y + offset, where X and/or Y may be unbound.
+   - If both are ground numbers, check the equality and return ve or nil.
+   - If X is bound to a number xv, derive Y = (xv - offset) / coeff and unify.
+   - If Y is bound to a number yv, derive X = coeff*yv + offset and unify.
+   - If both are unbound, store {:op :linear-eq :coeff coeff :rhs Y :offset offset}
+     on X, and the inverse {:op :linear-eq :coeff (1/coeff) :rhs X :offset (-offset/coeff)}
+     on Y so that binding either one later triggers propagation."
+  [x-term coeff y-var offset ve]
+  (let [xv (when (term/is-var? x-term)
+              (let [v (var-value x-term ve)]
+                (when (contains? v :val) (:val v))))
+        x-num (when (number? x-term) x-term)
+        x-val (or xv x-num)
+        yv    (let [v (var-value y-var ve)]
+                (when (contains? v :val) (:val v)))]
+    (cond
+      ;; Both ground — check equality
+      (and x-val yv)
+      (when (== x-val (+ (* coeff yv) offset)) ve)
+
+      ;; X is ground — derive Y
+      x-val
+      (when-not (zero? coeff)
+        (let [y-derived (/ (- x-val offset) coeff)]
+          (unify-or-bind y-var y-derived ve)))
+
+      ;; Y is ground — derive X
+      yv
+      (let [x-derived (+ (* coeff yv) offset)]
+        (if (term/is-var? x-term)
+          (unify-or-bind x-term x-derived ve)
+          (when (== x-term x-derived) ve)))
+
+      ;; Both unbound — store deferred constraints
+      (and (term/is-var? x-term) (is-unbound? x-term ve) (is-unbound? y-var ve))
+      (let [ve' (if-let [cs (is-unbound? x-term ve)]
+                  (update-var-value x-term
+                                    (update cs :var-constraints (fnil conj [])
+                                            {:op :linear-eq :coeff coeff :rhs y-var :offset offset})
+                                    ve)
+                  ve)]
+        (if-let [cs (is-unbound? y-var ve')]
+          (let [inv-coeff (if (zero? coeff) nil (/ 1.0 coeff))
+                inv-offset (if (zero? coeff) nil (/ (- offset) coeff))]
+            (if inv-coeff
+              (update-var-value y-var
+                                (update cs :var-constraints (fnil conj [])
+                                        {:op :linear-eq :coeff inv-coeff :rhs (if (term/is-var? x-term) x-term x-term) :offset inv-offset})
+                                ve')
+              ve'))
+          ve'))
+
+      :else ve)))
 
 ;;; ── Union-find: unify two variables ─────────────────────────────────────────
 

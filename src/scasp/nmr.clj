@@ -129,21 +129,26 @@
 (defn generate-nmr-check
   "Generate NMR check goals and rules.  Returns updated program.
    Integrity constraints (_false/0 rules) are handled by DCC in run-query,
-   not by NMR sub-checks, so they are not added to nmr-goals here."
-  [prog]
-  (let [olon (olon-rules prog)]
-    (if (empty? olon)
-      ;; No OLONs → NMR check is just _nmr_check/0 (a trivial fact)
-      (let [nmr-head  (term/make-compound "_nmr_check" [])
-            prog'     (prog/assert-rule (prog/make-rule nmr-head []) prog)
-            nmr-goals [(term/make-compound "_nmr_check" [])]]
-        (prog/assert-nmr-check nmr-goals prog'))
-      ;; Generate sub-checks for OLON rules
-      (let [chk-rules (map-indexed (fn [i r] (gen-olon-chk r (inc i))) olon)
-            chk-goals (mapv (fn [i] (term/make-compound (str "_chk" (inc i)) [])) (range (count olon)))
-            nmr-head  (term/make-compound "_nmr_check" [])
-            nmr-rule  (prog/make-rule nmr-head chk-goals)
-            prog'     (reduce #(prog/assert-rule %2 %1) prog chk-rules)
-            prog''    (prog/assert-rule nmr-rule prog')
-            nmr-goals [(term/make-compound "_nmr_check" [])]]
-        (prog/assert-nmr-check nmr-goals prog'')))))
+   not by NMR sub-checks, so they are not added to nmr-goals here.
+
+   opts:
+     :no-olon  true → skip OLON detection; treat program as having no OLONs
+     :no-nmr   true → skip NMR check entirely; append no NMR goals to queries"
+  ([prog] (generate-nmr-check prog {}))
+  ([prog opts]
+   (if (:no-nmr opts)
+     (prog/assert-nmr-check [] prog)
+     (let [olon (if (:no-olon opts) [] (olon-rules prog))]
+       (if (empty? olon)
+         (let [nmr-head  (term/make-compound "_nmr_check" [])
+               prog'     (prog/assert-rule (prog/make-rule nmr-head []) prog)
+               nmr-goals [(term/make-compound "_nmr_check" [])]]
+           (prog/assert-nmr-check nmr-goals prog'))
+         (let [chk-rules (map-indexed (fn [i r] (gen-olon-chk r (inc i))) olon)
+               chk-goals (mapv (fn [i] (term/make-compound (str "_chk" (inc i)) [])) (range (count olon)))
+               nmr-head  (term/make-compound "_nmr_check" [])
+               nmr-rule  (prog/make-rule nmr-head chk-goals)
+               prog'     (reduce #(prog/assert-rule %2 %1) prog chk-rules)
+               prog''    (prog/assert-rule nmr-rule prog')
+               nmr-goals [(term/make-compound "_nmr_check" [])]]
+           (prog/assert-nmr-check nmr-goals prog'')))))))

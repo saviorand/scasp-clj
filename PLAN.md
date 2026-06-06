@@ -12,7 +12,7 @@ Run tests:
 ```
 clj -X:test :nses '[scasp.vars-test scasp.unify-test scasp.solver-test scasp.main-test scasp.clpr-test scasp.builtins-test]'
 ```
-Current baseline: **83 tests, 168 assertions, 0 failures.**
+Current baseline: **88 tests, 177 assertions, 0 failures.**
 
 ---
 
@@ -83,38 +83,25 @@ All three bugs identified in the comparison against `refs/scasp/src/sasp/` have 
 
 ---
 
-### Minor — `no_olon` / `no_nmr` config flags
+### Minor — `no_olon` / `no_nmr` config flags ✅ Fixed
 
-Not present in the port. These are user-facing options to disable OLON detection / NMR check. Not needed for correctness; omitted intentionally.
+Added as an `opts` map to `build-program` / `solve` / `solve-all` / `solve-n`:
+- `:no-nmr true` — skip NMR check entirely (no `_nmr_check` goals appended to query)
+- `:no-olon true` — skip OLON detection; treat program as having no OLONs (generates trivial `_nmr_check` fact)
+
+Usage: `(main/solve-all rules query #{} {:no-nmr true})`
 
 ---
 
 ## Three remaining solver gaps (no parser needed)
 
-### Gap 1 — `is/2` with compound unbound RHS
+### Gap 1 — `is/2` with compound unbound RHS ✅ Fixed
 
-**Symptom:** `X is Y + 1` when `Y` is unbound soft-fails (returns no solutions). Should defer as linear equality: `X = Y + 1`.
+`resolve-arith` now returns `[::linear coeff var offset]` for affine expressions with one unbound variable. The `:is` handler in `solve-expression` calls `vars/add-linear-eq` which:
+- If LHS or RHS is already ground, derives and binds the other immediately.
+- If both are unbound, stores `{:op :linear-eq :coeff c :rhs Y :offset k}` on X and the inverse on Y; `check-var-constraints` fires the derivation when either is later bound.
 
-**Location:** `solver.clj` `solve-expression` op `:is` case (~line 162):
-```clojure
-;; rhs is a compound with unbound inner vars — cannot defer, soft fail
-:else nil
-```
-
-**Fix:** Change `resolve-arith` in `solver.clj` to return a `[::linear coeff var offset]` sentinel when the expression is affine in exactly one unbound variable (e.g., `Y + 1` → `[::linear 1 "Y" 1]`, `3 * Y` → `[::linear 3 "Y" 0]`). For anything nonlinear, keep throwing.
-
-Then in the `:is` case, when the sentinel is `[::linear coeff var offset]` and LHS is an unbound var `X`:
-- Record on `X`: when `X` is later bound to `v`, check `v == coeff * Y_val + offset`
-- Record on `Y`: when `Y` is later bound to `w`, bind `X` to `coeff * w + offset`
-
-Simplest implementation: store as a `:var-constraints` entry of the form `{:op :linear-eq :coeff c :offset k :rhs "Y"}` on `X`, and a flipped one on `Y`. Handle in `check-var-constraints` in `vars.clj`.
-
-**Test to write:**
-```clojure
-;; X is Y + 1, Y is 4  →  X = 5
-;; X is Y + 1, X is 5  →  Y = 4 (if Y is still unbound)
-;; X is Y + 1, Y is 4, X is 6  →  fails
-```
+Handles: `X is Y + 1`, `X is 2 * Y`, `X is 3 - Y`, chains like `X is Y + 1, Y is 4 → X = 5`, and failure when the constraint is violated. Nonlinear expressions (e.g. `X is Y * Y`) still soft-fail as before.
 
 ---
 
