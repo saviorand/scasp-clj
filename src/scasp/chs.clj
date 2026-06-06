@@ -96,65 +96,77 @@
   [entry functor chs]
   (update chs functor (fn [es] (vec (remove #(identical? % entry) es)))))
 
-;;; ── Coinductive failure (negation in CHS) ────────────────────────────────────
-
-(defn- match-neg-entry
-  "Find the first in-progress (success=false) entry for the dual of functor
-   whose args unify with args. Returns the entry or nil."
-  [functor args ve chs]
-  (let [neg-f       (term/negate-functor functor)
-        neg-entries (filter #(not (:success? %)) (entries-for neg-f chs))]
-    (exact-match args neg-entries ve)))
+;;; ── Dual CHS helpers ─────────────────────────────────────────────────────────
 
 (defn- coinductive-failure?
-  "True if the negation of functor/args is present in CHS with success=false
-   (i.e., currently being proven on this branch — OLON constructive coinduction).
-   A success=true entry means the positive already completed elsewhere; that is
-   not a loop and must not trigger coinductive success for the dual."
+  "True if there is an exact-match CHS entry for the dual of functor/args
+   that is still in-progress (success? false).  When the dual is in-progress,
+   we know it will fail, so the current call coinductively succeeds."
   [functor args ve chs]
-  (boolean (match-neg-entry functor args ve chs)))
+  (let [neg-f (term/negate-functor functor)]
+    (boolean (exact-match args (filter (complement :success?) (entries-for neg-f chs)) ve))))
 
 (defn- propagate-neg-constraints
-  "When coinductive failure fires, propagate disequality constraints from
-   the matching dual CHS entry's args to the current call's args.
-   For each position where the CHS entry arg is a frozen var with constraints,
-   add those constraints to the corresponding current arg via disequality.
-   Returns updated ve."
-  [functor args ve chs]
-  (if-let [entry (match-neg-entry functor args ve chs)]
-    (reduce (fn [ve' [call-arg entry-arg]]
-              (let [ev (vars/var-value entry-arg ve')]
-                (if (and (term/is-var? entry-arg)
-                         (not (contains? ev :val))
-                         (seq (:constraints ev)))
-                  ;; Propagate each constraint as a disequality on call-arg
-                  (reduce (fn [ve'' c]
-                            (or (vars/add-var-constraint
-                                 (if (term/is-var? call-arg) call-arg entry-arg)
-                                 c ve'')
-                                ve''))
-                          ve'
-                          (:constraints ev))
-                  ve')))
-            ve
-            (map vector args (:args entry)))
-    ve))
-
-;;; ── Constructive coinductive failure ─────────────────────────────────────────
-
-(defn- dual-entries-unifying
-  "Return CHS entries for the dual of functor that unify with args."
+  "Propagate disequality constraints from the in-progress dual entry's args
+   onto the corresponding current-call args.  Returns updated ve."
   [functor args ve chs]
   (let [neg-f   (term/negate-functor functor)
+        entries (filter (complement :success?) (entries-for neg-f chs))
+        matched (exact-match args entries ve)]
+    (if matched
+      (reduce (fn [ve' [call-arg entry-arg]]
+                (let [ev (vars/var-value entry-arg ve')]
+                  (if (and (term/is-var? entry-arg)
+                           (not (contains? ev :val))
+                           (seq (:constraints ev)))
+                    (reduce (fn [ve'' c]
+                              (let [target (if (term/is-var? call-arg) call-arg entry-arg)]
+                                (or (vars/add-var-constraint target c ve'')
+                                    ve'')))
+                            ve'
+                            (:constraints ev))
+                    ve')))
+              ve
+              (map vector args (:args matched)))
+      ve)))
+
+(defn- dual-entries-for-args
+  "Return all CHS entries for the dual of functor whose args unify (but do not
+   exactly match) with args.  Used for constructive coinductive failure."
+  [functor args ve chs]
+  (let [neg-f       (term/negate-functor functor)
+        pos-entries (entries-for functor chs)
         neg-entries (entries-for neg-f chs)]
-    (filter (fn [e]
-              (when-not (exact-match args (entries-for functor chs) ve)
-                ;; Try to unify with each dual entry
+    ;; Only proceed if there is no exact match of the positive in the CHS
+    (when-not (exact-match args (filter :success? pos-entries) ve)
+      (filter (fn [e]
                 (unify/solve-unify
                  (term/make-compound (term/functor-name-str functor) args)
-                 (term/make-compound (term/functor-name-str neg-f) (:args e))
-                 ve false)))
-            neg-entries)))
+                 (term/make-compound (term/functor-name-str functor) (:args e))
+                 ve false))
+              neg-entries))))
+
+(defn- propagate-dual-constraints
+  "Propagate disequality constraints from unifying (non-exact) dual-entry args
+   onto the corresponding current-call args.  Returns updated ve."
+  [args dual-entries ve]
+  (reduce (fn [ve-acc entry]
+            (reduce (fn [ve' [call-arg entry-arg]]
+                      (let [ev (vars/var-value entry-arg ve')]
+                        (if (and (term/is-var? entry-arg)
+                                 (not (contains? ev :val))
+                                 (seq (:constraints ev)))
+                          (reduce (fn [ve'' c]
+                                    (let [target (if (term/is-var? call-arg) call-arg entry-arg)]
+                                      (or (vars/add-var-constraint target c ve'')
+                                          ve'')))
+                                  ve'
+                                  (:constraints ev))
+                          ve')))
+                    ve-acc
+                    (map vector args (:args entry))))
+          ve
+          dual-entries))
 
 ;;; ── Check call stack for loops ───────────────────────────────────────────────
 
@@ -207,41 +219,55 @@
 
 ;;; ── Main CHS check ───────────────────────────────────────────────────────────
 
-(defn check-chs
-  "Check the CHS for functor/args.
-   Returns a lazy seq of result maps; each map has:
-     :result  – :not-present | :coinductive-success
-     :var-env – updated var-env
-     :even-loop – {:cycle [] :cvars []} or nil
 
-   An empty seq means failure."
+(defn check-chs
+  "Check the CHS for functor/args.  Structure mirrors check_chs/8 in chs.pl:
+
+   Call-stack loop detection runs first:
+   - Positive loop  → hard failure.
+   - Even loop      → coinductive success (with loop info).
+
+   Then CHS entry checks:
+   1. Exact match of the *positive* with success=true → coinductive success.
+   2. Exact match of the *dual* with success=false (in-progress) → coinductive
+      success (the dual is about to fail, so the positive succeeds).
+   3. Dual entries that unify but don't exactly match → propagate their
+      constraints, then continue as :not-present.
+   4. Otherwise → :not-present.
+
+   Returns a lazy seq of result maps:
+     {:result  :not-present | :coinductive-success
+      :var-env <updated>
+      :even-loop {:cycle [] :cvars []} | nil}
+   Empty seq means failure."
   [functor args ve chs call-stack]
-  (let [entries (entries-for functor chs)
-        {:keys [result cycle cvars var-env]} (check-negations functor args ve call-stack)]
+  (let [{:keys [result cycle cvars var-env]} (check-negations functor args ve call-stack)]
     (case result
-      :positive-loop
-      [] ; positive loop → fail
+      :positive-loop []
 
       :even-loop
       [{:result    :coinductive-success
         :var-env   var-env
         :even-loop {:cycle cycle :cvars cvars}}]
 
-      ;; not-found: check CHS entries
-      (cond
-        ;; coinductive success: exact match with success=true
-        (exact-match args (filter :success? entries) ve)
-        [{:result    :coinductive-success
-          :var-env   ve
-          :even-loop {:cycle [] :cvars []}}]
+      ;; not-found in call stack: check CHS entries
+      (let [entries (entries-for functor chs)]
+        (cond
+          ;; Coinductive success: completed positive entry matches
+          (exact-match args (filter :success? entries) ve)
+          [{:result :coinductive-success :var-env ve :even-loop {:cycle [] :cvars []}}]
 
-        ;; constructive coinductive failure: negation in CHS → succeed (constrained)
-        (coinductive-failure? functor args ve chs)
-        [{:result    :coinductive-success
-          :var-env   (propagate-neg-constraints functor args ve chs)
-          :even-loop {:cycle [] :cvars []}}]
+          ;; Coinductive success via dual: dual is in-progress (will fail) → positive succeeds
+          (coinductive-failure? functor args ve chs)
+          [{:result    :coinductive-success
+            :var-env   (propagate-neg-constraints functor args ve chs)
+            :even-loop {:cycle [] :cvars []}}]
 
-        :else
-        [{:result    :not-present
-          :var-env   ve
-          :even-loop nil}]))))
+          ;; Constructive coinductive failure: dual entries unify → propagate + proceed
+          :else
+          (let [duals (dual-entries-for-args functor args ve chs)]
+            [{:result    :not-present
+              :var-env   (if (seq duals)
+                           (propagate-dual-constraints args duals ve)
+                           ve)
+              :even-loop nil}]))))))

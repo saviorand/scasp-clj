@@ -2,97 +2,113 @@
   "Call graph analysis and NMR (Non-monotonic Reasoning) check generation.
 
    Detects odd loops over negation (OLON) in the program and generates
-   auxiliary sub-check predicates that are appended to every query."
-  (:require [scasp.term    :as term]
+   auxiliary sub-check predicates that are appended to every query.
+
+   Algorithm mirrors nmr_check.pl / call_graph.pl from refs/scasp:
+   - Build the call graph from *original user rules only* (no duals, no
+     generated _chk / _nmr_check predicates).
+   - Use DFS with per-path negation counting to classify each cycle.
+   - Only cycles with an odd total negation count are OLONs."
+  (:require [clojure.string :as str]
+            [scasp.term    :as term]
             [scasp.program :as prog]))
 
-;;; ── Call graph ───────────────────────────────────────────────────────────────
+;;; ── User-rule filter ─────────────────────────────────────────────────────────
 
-(defn build-call-graph
-  "Build a map {functor → #{called-functors}} from program rules.
-   Edges only go from positive predicates; negated calls are to dual functors."
+(defn- user-functor?
+  "True for functors that belong to the original user program.
+   Excludes duals (not_*), inner duals (_not_*), NMR/chk helpers (_*),
+   and headless-rule dummy heads."
+  [f]
+  (and (not (term/is-dual? f))
+       (not (prog/headless-functor? f))
+       (not (prog/scasp-builtin? f))
+       (not (str/starts-with? (term/functor-name-str f) "_"))))
+
+;;; ── Call graph (user rules only) ─────────────────────────────────────────────
+
+(defn- build-user-call-graph
+  "Build a map {functor → [{:to called-functor :neg? bool} …]} from user rules.
+   :neg? true when the call is negated (NAF or explicit dual call)."
   [program]
-  (let [all-rules (for [[f rs] (:rules program) r rs] [f r])]
-    (reduce (fn [g [f {:keys [body]}]]
-              (let [called (for [goal body
-                                 :let [gf (prog/goal-functor goal)]
-                                 :when gf]
-                             gf)]
-                (update g f (fn [s] (into (or s #{}) called)))))
-            {}
-            all-rules)))
+  (reduce (fn [g [f {:keys [body]}]]
+            (let [edges (for [goal body
+                               :let [gf   (prog/goal-functor goal)
+                                     neg? (or (term/is-naf? goal)
+                                              (term/is-sneg? goal))]
+                               :when (and gf (user-functor? (term/negate-functor gf)))
+                               ;; resolve to the positive functor name
+                               :let [pos-f (if (term/is-dual? gf)
+                                             (term/negate-functor gf)
+                                             gf)]]
+                           {:to pos-f :neg? neg?})]
+              (update g f (fn [es] (into (or es []) edges)))))
+          {}
+          (for [[f rs] (:rules program)
+                :when  (user-functor? f)
+                r      rs]
+            [f r])))
 
-;;; ── SCC detection (Tarjan's algorithm) ──────────────────────────────────────
+;;; ── Path-based DFS cycle detection ──────────────────────────────────────────
 
-(defn- tarjan-sccs
-  "Return a list of strongly connected components (each a set of nodes)."
-  [graph]
-  (let [nodes (set (concat (keys graph) (mapcat val graph)))
-        state (atom {:index 0 :stack [] :on-stack #{} :indices {} :lowlinks {} :sccs []})
-        strongconnect
-        (fn strongconnect [v]
-          (let [{:keys [index]} @state]
-            (swap! state assoc-in [:indices v] index)
-            (swap! state assoc-in [:lowlinks v] index)
-            (swap! state update :index inc)
-            (swap! state update :stack conj v)
-            (swap! state update :on-stack conj v))
-          (doseq [w (get graph v #{})]
-            (if (nil? (get-in @state [:indices w]))
-              (do (strongconnect w)
-                  (let [lv (get-in @state [:lowlinks v])
-                        lw (get-in @state [:lowlinks w])]
-                    (when (< lw lv)
-                      (swap! state assoc-in [:lowlinks v] lw))))
-              (when (contains? (:on-stack @state) w)
-                (let [lv  (get-in @state [:lowlinks v])
-                      iw  (get-in @state [:indices w])]
-                  (when (< iw lv)
-                    (swap! state assoc-in [:lowlinks v] iw))))))
-          (when (= (get-in @state [:lowlinks v])
-                   (get-in @state [:indices v]))
-            (loop [scc #{}]
-              (let [w (peek (:stack @state))]
-                (swap! state update :stack pop)
-                (swap! state update :on-stack disj w)
-                (let [scc' (conj scc w)]
-                  (if (= w v)
-                    (swap! state update :sccs conj scc')
-                    (recur scc')))))))]
-    (doseq [v nodes]
-      (when (nil? (get-in @state [:indices v]))
-        (strongconnect v)))
-    (:sccs @state)))
+(defn- update-neg
+  "Same as neg_value in the reference: 0 + neg → 1; 1 + neg → 2; 2 + neg → 1."
+  [n neg?]
+  (if-not neg?
+    n
+    (case n
+      0 1
+      1 2
+      2 1)))
+
+(defn- dfs-from
+  "DFS from node `start` collecting OLON rule-functors.
+   visited is a set of [node parity] pairs to avoid revisiting.
+   path is the ordered list of [from neg?] edges on the current path.
+   Returns a set of functors that are part of OLON cycles."
+  [start graph]
+  (let [olon-nodes (atom #{})]
+    (letfn [(visit [node neg-parity path-nodes visited]
+              (doseq [{:keys [to neg?]} (get graph node [])]
+                (let [new-parity (update-neg neg-parity neg?)]
+                  (cond
+                    ;; Cycle back to a node already on the current path
+                    (contains? path-nodes to)
+                    (when (= new-parity 1) ; odd negation count → OLON
+                      ;; Mark every node in the cycle as OLON
+                      (swap! olon-nodes conj to)
+                      (swap! olon-nodes conj node))
+
+                    ;; Already visited this node with this parity → skip
+                    (contains? visited [to new-parity])
+                    nil
+
+                    ;; New node: recurse
+                    :else
+                    (visit to new-parity
+                           (conj path-nodes to)
+                           (conj visited [to new-parity]))))))]
+      (visit start 0 #{start} #{[start 0]}))
+    @olon-nodes))
 
 ;;; ── OLON detection ───────────────────────────────────────────────────────────
 
-(defn- neg-count-in-body
-  "Number of NAF (or dual) goals in rule body."
-  [{:keys [body]}]
-  (count (filter (fn [g]
-                   (or (term/is-naf? g)
-                       (and (term/is-compound? g) (term/is-dual? (term/term-functor g)))))
-                 body)))
-
 (defn olon-rules
-  "Return rules that participate in odd loops over negation.
-   Excludes _false/0 headless rules — they are always added to the NMR check
-   separately as integrity constraint sub-checks."
+  "Return original user rules whose head functor participates in an odd loop
+   over negation.  Excludes _false/0 headless rules (handled by DCC)."
   [program]
-  (let [cg   (build-call-graph program)
-        sccs (tarjan-sccs cg)
-        cyclic-sccs (filter (fn [scc]
-                              (or (> (count scc) 1)
-                                  (contains? (get cg (first scc) #{}) (first scc))))
-                            sccs)]
+  (let [cg         (build-user-call-graph program)
+        all-nodes  (set (concat (keys cg) (map :to (mapcat val cg))))
+        olon-nodes (reduce (fn [acc node]
+                             (into acc (dfs-from node cg)))
+                           #{}
+                           all-nodes)]
     (into []
-          (for [scc  cyclic-sccs
-                f    scc
-                :when (not= f "_false/0")   ; headless rules handled separately
-                r    (prog/defined-rules f program)
-                :when (pos? (neg-count-in-body r))]
+          (for [f    olon-nodes
+                :when (user-functor? f)
+                :when (not= f "_false/0")
+                r    (prog/defined-rules f program)]
             r))))
-
 
 ;;; ── NMR sub-check predicates ─────────────────────────────────────────────────
 

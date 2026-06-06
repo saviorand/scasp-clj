@@ -221,17 +221,26 @@
 ;;; ── Forall solver ────────────────────────────────────────────────────────────
 
 (defn solve-forall
-  "Solve forall(V, Goal) universally quantified over V."
+  "Solve forall(V, Goal) universally quantified over V.
+
+   Mirrors solve_forall/solve_forall2/solve_forall3 in solve.pl:
+   1. If V already bound, solve Goal normally.
+   2. Mark V non-bindable and non-loop, then solve Goal once.
+   3. After Goal succeeds:
+      - V still unbound with no new constraints → universal success.
+      - V acquired new disequality constraints (values it must not be)
+        → must re-verify Goal holds with V bound to each of those values.
+      - V got bound → fail (forall requires V to remain free)."
   [v-name goal ve chs call-stack in-nmr? program]
   (let [orig-cs (vars/is-unbound? v-name ve)]
     (if-not orig-cs
       ;; V already bound → solve goal normally
       (solve-goals [goal] ve chs call-stack in-nmr? program)
-      ;; V unbound: mark non-bindable + non-loop
+      ;; V unbound: mark non-bindable + non-loop, then solve Goal once
       (let [marked (assoc orig-cs :bindable? false :loop-var -1)
             ve1    (vars/update-var-value v-name marked ve)
             body-results (solve-goals [goal] ve1 chs call-stack in-nmr? program)]
-        ;; Vacuous truth: goal produces no solutions → forall trivially succeeds
+        ;; Vacuous truth: no counterexample exists → forall trivially succeeds
         (if (empty? body-results)
           [(mk-result ve chs {:forall v-name :body :vacuous} [])]
           (lazy-seq
@@ -239,23 +248,24 @@
               (fn [{ve2 :var-env chs1 :chs just :just el :even-loops}]
                 (let [cur-cs (vars/is-unbound? v-name ve2)]
                   (cond
-                    ;; Still unbound (no constraints acquired) → success
-                    (and cur-cs (empty? (:constraints cur-cs)))
+                    ;; V still unbound with no new constraints → success
+                    (and cur-cs (empty? (set/difference
+                                          (:constraints cur-cs)
+                                          (:constraints orig-cs))))
                     [(mk-result ve2 chs1 {:forall v-name :body just} el)]
 
-                    ;; Acquired constraints → must succeed for each value
-                    (and cur-cs (seq (:constraints cur-cs)))
+                    ;; V acquired new disequality constraints → re-verify for each
+                    cur-cs
                     (let [new-vals (set/difference
-                                    (:constraints cur-cs)
-                                    (:constraints orig-cs))]
-                      (if (empty? new-vals)
-                        [(mk-result ve2 chs1 {:forall v-name :body just} el)]
-                        (when (every? (fn [val]
-                                        (let [ve3 (vars/update-var-value v-name {:val val} ve2)
-                                              g2  (term/substitute v-name val goal)]
-                                          (seq (solve-goals [g2] ve3 chs1 call-stack in-nmr? program))))
-                                      new-vals)
-                          [(mk-result ve2 chs1 {:forall v-name :body just} el)])))
+                                     (:constraints cur-cs)
+                                     (:constraints orig-cs))]
+                      (when (every? (fn [val]
+                                      (let [ve3 (vars/update-var-value v-name {:val val} ve2)
+                                            g2  (term/substitute v-name val goal)]
+                                        (seq (solve-goals [g2] ve3 chs1 call-stack in-nmr? program))))
+                                    new-vals)
+                        [(mk-result ve2 chs1 {:forall v-name :body just} el)]))
+
                     ;; V got bound → fail
                     :else [])))
               body-results)))))))
