@@ -24,7 +24,7 @@ Current baseline: **88 tests, 177 assertions, 0 failures.**
 | Variable environment (union-find, bindability, loop-var flags) | `vars.clj` |
 | Unification + disequality (`solve-unify`, `solve-dnunify`) | `unify.clj` |
 | Dual rule compilation | `duals.clj` |
-| NMR check generation (OLON detection via path-based DFS) | `nmr.clj` |
+| NMR check generation (OLON detection via path-based DFS, forall-wrapped sub-checks) | `nmr.clj` |
 | CHS: positive/negative loop detection, even-loop, coinductive success/failure | `chs.clj` |
 | CHS: constraint propagation from negated CHS entries | `chs.clj` |
 | Core solver: `solve-goals`, `expand-call`, abducibles, DCC post-solve check | `solver.clj` |

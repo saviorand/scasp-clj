@@ -11,7 +11,8 @@
    - Only cycles with an odd total negation count are OLONs."
   (:require [clojure.string :as str]
             [scasp.term    :as term]
-            [scasp.program :as prog]))
+            [scasp.program :as prog]
+            [scasp.duals   :as duals]))
 
 ;;; ── User-rule filter ─────────────────────────────────────────────────────────
 
@@ -112,17 +113,58 @@
 
 ;;; ── NMR sub-check predicates ─────────────────────────────────────────────────
 
+(defn- naf-wrap
+  "Wrap goal in NAF: {:op :not :args [goal]}."
+  [goal]
+  {:op :not :args [goal]})
+
+(defn- body-has-naf-head?
+  "True if the rule body already contains not(head) with the same functor and args."
+  [{:keys [head body]}]
+  (let [hf (term/term-functor head)]
+    (some (fn [g]
+            (and (term/is-naf? g)
+                 (let [inner (first (:args g))]
+                   (and (term/is-compound? inner)
+                        (= (term/term-functor inner) hf)
+                        (= (:args inner) (:args head))))))
+          body)))
+
 (defn- gen-olon-chk
-  "Generate a sub-check rule for a single OLON rule.
-   The sub-check calls the dual of the rule's head."
-  [olon-rule chk-n]
+  "Generate sub-check rules for a single OLON rule, mirroring olon_chks/3.
+
+   For a rule with head p(X…) and body B:
+   1. Build modified rule: p(X…) :- B, not(p(X…))  [unless not(p) already in B]
+   2. Run full dual compilation on the modified rule under fresh head _chk_N(X…)
+   3. NMR goal: forall(X1, forall(X2, …, not(_chk_N(X1…))))
+
+   Returns [nmr-goal updated-prog]."
+  [olon-rule chk-n prog]
   (let [head      (:head olon-rule)
-        df        (term/negate-functor (term/term-functor head))
-        dual-args (prog/var-list (term/functor-arity df))
-        dual-call (term/make-compound (term/functor-name-str df) dual-args)
-        chk-head  (term/make-compound (str "_chk" chk-n) [])
-        chk-body  [dual-call]]
-    (prog/make-rule chk-head chk-body)))
+        head-args (:args head)
+        arity     (count head-args)
+        ;; 1. Build modified rule body (append not(head) unless already present)
+        body'     (if (body-has-naf-head? olon-rule)
+                    (:body olon-rule)
+                    (conj (vec (:body olon-rule)) (naf-wrap head)))
+        mod-rule  (prog/make-rule head body')
+        ;; 2. Fresh chk head with same arity as p
+        chk-name  (str "_chk" chk-n)
+        chk-args  (prog/var-list arity)
+        chk-head  (term/make-compound chk-name chk-args)
+        ;; Run comp-dual-for-clause on the modified rule under the chk head
+        [_inner-head prog'] (duals/comp-dual-for-clause chk-head mod-rule 1 prog)
+        ;; Also compile duals for chk-head itself (outer not__chk_N)
+        chk-functor (term/term-functor chk-head)
+        prog''    (duals/comp-dual chk-functor
+                                   (prog/defined-rules chk-functor prog')
+                                   prog')
+        ;; 3. NMR goal: forall(X1, forall(X2, …, not(_chk_N(X1…))))
+        chk-call  (term/make-compound chk-name chk-args)
+        nmr-goal  (reduce (fn [g v] (term/make-compound "forall" [v g]))
+                          (naf-wrap chk-call)
+                          (reverse chk-args))]
+    [nmr-goal prog'']))
 
 ;;; ── generate-nmr-check entry point ──────────────────────────────────────────
 
@@ -144,11 +186,15 @@
                prog'     (prog/assert-rule (prog/make-rule nmr-head []) prog)
                nmr-goals [(term/make-compound "_nmr_check" [])]]
            (prog/assert-nmr-check nmr-goals prog'))
-         (let [chk-rules (map-indexed (fn [i r] (gen-olon-chk r (inc i))) olon)
-               chk-goals (mapv (fn [i] (term/make-compound (str "_chk" (inc i)) [])) (range (count olon)))
+         ;; Generate one sub-check per OLON rule
+         (let [[chk-goals prog']
+               (reduce (fn [[goals p] [idx rule]]
+                         (let [[goal p'] (gen-olon-chk rule (inc idx) p)]
+                           [(conj goals goal) p']))
+                       [[] prog]
+                       (map-indexed vector olon))
                nmr-head  (term/make-compound "_nmr_check" [])
                nmr-rule  (prog/make-rule nmr-head chk-goals)
-               prog'     (reduce #(prog/assert-rule %2 %1) prog chk-rules)
                prog''    (prog/assert-rule nmr-rule prog')
                nmr-goals [(term/make-compound "_nmr_check" [])]]
            (prog/assert-nmr-check nmr-goals prog'')))))))

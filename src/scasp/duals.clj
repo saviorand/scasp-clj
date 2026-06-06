@@ -144,7 +144,7 @@
 
 ;;; ── Full dual for one rule (comp-dual2 equivalent) ──────────────────────────
 
-(defn- comp-dual-for-clause
+(defn comp-dual-for-clause
   "Compute the dual clauses for a single original rule, adding them to prog.
    Returns [inner-dual-head prog]."
   [outer-dual-head clause inner-counter prog]
