@@ -28,9 +28,11 @@
    :neg (into [] (keep #(when (= (:op %) :negative) (first (:args %))) ontology))})
 
 (defn- extract-predicates
-  "extract_predicates: all unique pred keywords except positive, negative, goal-kw."
+  "extract_predicates: all unique pred keywords except positive, negative, goal-kw.
+   Skips terms with variable args — those are type hints, not ground facts."
   [ontology goal-kw]
   (->> ontology
+       (remove #(some string? (:args %)))
        (map :op)
        (remove nil?)
        (remove #{:positive :negative goal-kw})
@@ -104,11 +106,14 @@
     (println "false.")))
 
 (println "\n=== Induction ===")
-;; positive(b1).  bean(b1).  from_s1(b1).  ?- white.
+;; Exact ontology from inferenceExample.pl:
+;; sack(s1), bean(b1), white(Y), from_s1(b1), positive(b1)
+;; white(Y) is a type hint (Y unbound) — filtered out by extract-predicates/propositionalize
 (let [result (inference
               :induction
               [(c :sack :s1)
                (c :bean :b1)
+               (c :white "Y")   ; type hint — Y is a variable string, skipped as ground fact
                (c :from-s1 :b1)
                (c :positive :b1)]
               :white)]

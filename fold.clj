@@ -105,9 +105,17 @@
   [clause pos neg predicates background]
   (let [base-info (info-value clause pos neg background)]
     (reduce (fn [[best-kw best-ig] pred-kw]
-              (let [gain (compute-gain (add-literal clause pred-kw true)
-                                       pos neg base-info background)]
-                (if (> gain best-ig) [pred-kw gain] [best-kw best-ig])))
+              (let [candidate (add-literal clause pred-kw true)
+                    gain      (compute-gain candidate pos neg base-info background)]
+                (cond
+                  (> gain best-ig)              [pred-kw gain]
+                  ;; On tie, new literal wins unless current best has fewer body vars.
+                  ;; Matches choose_tie_clause in fold.pl: last tie wins when var counts equal.
+                  (and (>= gain 0.0) (= gain best-ig))
+                  (let [cur-vars  (count (filter string? (mapcat :args (:body (add-literal clause best-kw true)))))
+                        new-vars  (count (filter string? (mapcat :args (:body candidate))))]
+                    (if (< cur-vars new-vars) [best-kw best-ig] [pred-kw gain]))
+                  :else                         [best-kw best-ig])))
             [nil -1.0]
             predicates)))
 
@@ -273,10 +281,13 @@
      (let [term (if (contains? fact :head) (:head fact) fact)
            op   (:op term)
            args (:args term)]
-       (case (count args)
-         1 (update bg op (fnil conj #{}) (first args))
-         2 (let [prop-kw (keyword (str (name op) "_" (name (second args))))]
-             (update bg prop-kw (fnil conj #{}) (first args)))
-         bg)))
+       ;; Skip terms with variable args (strings) — they are type hints, not ground facts.
+       (if (some string? args)
+         bg
+         (case (count args)
+           1 (update bg op (fnil conj #{}) (first args))
+           2 (let [prop-kw (keyword (str (name op) "_" (name (second args))))]
+               (update bg prop-kw (fnil conj #{}) (first args)))
+           bg))))
    {}
    facts))
