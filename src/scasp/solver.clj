@@ -313,15 +313,26 @@
 
 ;;; ── Goal dispatcher ──────────────────────────────────────────────────────────
 
+(defn- prepend-just
+  "Cons j1 onto j2, producing a flat sequence of justification nodes."
+  [j1 j2]
+  (cond
+    (or (nil? j1) (= j1 :success)) j2
+    (or (nil? j2) (= j2 :success)) j1
+    (sequential? j2)               (into [j1] j2)
+    :else                          [j1 j2]))
+
 (defn- solve-goals*
   [goals ve chs call-stack in-nmr? even-loops program]
   (if (empty? goals)
     [(mk-result ve chs :success [])]
     (lazy-seq
       (mapcat
-        (fn [{ve' :var-env chs' :chs el :even-loops}]
+        (fn [{ve' :var-env chs' :chs just1 :just el :even-loops}]
           (let [el' (into even-loops el)]
-            (map (fn [r2] (update r2 :even-loops into el))
+            (map (fn [r2] (-> r2
+                              (update :even-loops into el)
+                              (update :just #(prepend-just just1 %))))
                  (solve-goals* (rest goals) ve' chs' call-stack in-nmr? el' program))))
         (solve-goal (first goals) ve chs call-stack in-nmr? even-loops program)))))
 
@@ -469,7 +480,7 @@
                 ve''        (unify/solve-unify goal h2 ve' false)]
             (when ve''
               (map (fn [r]
-                     (update r :just (fn [j] {:rule head :sub-just j})))
+                     (update r :just (fn [j] {:rule h2 :sub-just j})))
                    (solve-goals b2 ve'' chs call-stack in-nmr? program))))
           ;; Try remaining rules
           (expand-call2 goal (rest rules) ve chs call-stack in-nmr? program))))))

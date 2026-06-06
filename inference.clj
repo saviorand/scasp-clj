@@ -5,7 +5,9 @@
    over an ontology list, using scasp-clj and the FOLD-R algorithm."
   (:require [scasp.main    :as main]
             [scasp.program :as prog]
-            [scasp.vars    :as vars]))
+            [scasp.vars    :as vars]
+            [scasp.term    :as term]
+            [clojure.string :as str]))
 
 ;;; ── Term helpers ─────────────────────────────────────────────────────────────
 
@@ -38,6 +40,90 @@
        (remove #{:positive :negative goal-kw})
        distinct
        vec))
+
+;;; ── Human-readable output matching scasp/human ──────────────────────────────
+
+(defn- human-term
+  "Format a ground term as natural language: 'pred holds for arg1, and arg2'."
+  [t ve]
+  (let [fill  (fn [x] (vars/fill-in x ve))
+        grnd  (fn [x] (let [v (fill x)] (if (keyword? v) (name v) (str v))))
+        op    (name (:op t))
+        args  (mapv fill (:args t))]
+    (cond
+      (empty? args)
+      (str op " holds")
+      (= (count args) 1)
+      (str op " holds for " (grnd (first args)))
+      :else
+      (let [all (mapv grnd args)
+            butlast-s (str/join ", " (butlast all))]
+        (str op " holds for " butlast-s ", and " (last all))))))
+
+(defn- print-model
+  "Print the answer set in human_model style: '• pred holds for ...' per entry."
+  [chs ve]
+  (doseq [[f entries] chs
+          {:keys [args success?]} entries
+          :when (and success?
+                     (not (str/starts-with? (term/functor-name-str f) "_")))]
+    (let [t {:op (keyword (term/functor-name-str f)) :args args}]
+      (println (str "   • " (human-term t ve))))))
+
+(declare print-just-tree)
+
+(defn- internal-term?
+  "True for NMR/dual/internal terms that should not appear in user output."
+  [t]
+  (when (map? t)
+    (let [n (name (:op t))]
+      (or (str/starts-with? n "_")
+          (str/starts-with? n "not_")))))
+
+(defn- print-just-tree
+  "Recursively print justification tree in human_justification_tree style."
+  [just ve indent]
+  (let [pad (str (apply str (repeat indent "   ")))]
+    (cond
+      (or (nil? just) (= just :success) (= just :vacuous))
+      nil
+
+      (:chs-success just)
+      (when-not (internal-term? (:chs-success just))
+        (println (str pad "[Coinductive success]")))
+
+      (:abduced just)
+      (println (str pad "[Assumed] " (human-term (:abduced just) ve)))
+
+      (:rule just)
+      (let [head (:rule just)
+            sub  (:sub-just just)]
+        (when-not (internal-term? head)
+          (if (or (nil? sub) (= sub :success))
+            (println (str pad (human-term head ve)))
+            (do
+              (println (str pad (human-term head ve) ", because"))
+              (print-just-tree sub ve (inc indent))))))
+
+      (:forall just)
+      (do
+        (println (str pad "for all " (:forall just)))
+        (print-just-tree (:body just) ve (inc indent)))
+
+      ;; Sequence of body goals resolved left-to-right
+      (sequential? just)
+      (doseq [j just] (print-just-tree j ve indent))
+
+      :else nil)))
+
+(defn print-justification
+  "Print Model and Justification Tree in the style of inference.pl's print_justification/2."
+  [result]
+  (let [{:keys [var-env chs just]} result]
+    (println "Model:")
+    (print-model chs var-env)
+    (println "\nJustification Tree:")
+    (print-just-tree just var-env 1)))
 
 ;;; ── inference/2 and inference/3 ──────────────────────────────────────────────
 
@@ -90,8 +176,7 @@
                 (c :from :b1 :s1)]
                (c :white "X"))]
   (if (seq results)
-    (doseq [res results]
-      (println "white(X) where X =" (vars/fill-in "X" (:var-env res))))
+    (doseq [res results] (print-justification res))
     (println "false.")))
 
 (println "\n=== Abduction ===")
@@ -101,8 +186,7 @@
                [(r (c :white "X") (c :from "X" :s1))]
                (c :white :b1))]
   (if (seq results)
-    (doseq [res results]
-      (println "Abduced (CHS):" (:chs res)))
+    (doseq [res results] (print-justification res))
     (println "false.")))
 
 (println "\n=== Induction ===")
