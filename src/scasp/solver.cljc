@@ -1,0 +1,525 @@
+(ns scasp.solver
+  "Core s(CASP) solver.
+
+   Every solve-* function returns a lazy sequence of result maps:
+     {:var-env  <updated var-env>
+      :chs      <updated CHS>
+      :just     <justification tree node>
+      :even-loops [cycle…]}
+
+   An empty sequence means failure.  Backtracking = taking the next element."
+  (:require [clojure.set   :as set]
+            [scasp.term    :as term]
+            [scasp.vars    :as vars]
+            [scasp.unify   :as unify]
+            [scasp.program :as prog]
+            [scasp.chs     :as chs]))
+
+;;; Forward declarations (mutual recursion between solve functions)
+(declare solve-goal solve-goals solve-goals* solve-predicate expand-call expand-call2)
+
+(defn- collect-cvars
+  "Flatten all cvars from a list of even-loop entries [{:cycle … :cvars […]} …]."
+  [even-loops]
+  (into [] (mapcat :cvars) even-loops))
+
+;;; ── Result record helper ─────────────────────────────────────────────────────
+
+(defn- mk-result [ve ch just el]
+  {:var-env ve :chs ch :just just :even-loops el})
+
+
+;;; ── CLP(R) symbolic constraint helpers ──────────────────────────────────────
+
+(defn- resolve-arith
+  "Try to evaluate t as a ground arithmetic value.
+   Returns the number, or [::unbound var-name] if t reduces to a single unbound var,
+   or [::linear coeff var-name offset] for affine expressions (coeff*var + offset),
+   or throws for non-linear or otherwise unevaluable expressions."
+  [t ve]
+  (cond
+    (number? t) t
+    (term/is-var? t)
+    (let [v (vars/var-value t ve)]
+      (if (contains? v :val)
+        (recur (:val v) ve)
+        [::unbound t]))
+    (term/is-compound? t)
+    (let [op  (:op t)
+          a1  (first  (:args t))
+          a2  (second (:args t))
+          r1  (when a1 (resolve-arith a1 ve))
+          r2  (when a2 (resolve-arith a2 ve))
+          lin? (fn [r] (and (vector? r) (= (first r) ::linear)))
+          unb? (fn [r] (and (vector? r) (= (first r) ::unbound)))]
+      (cond
+        ;; Both ground — evaluate directly
+        (and (number? r1) (number? r2))
+        (let [va r1 vb r2]
+          (cond
+            (= op :+)    (+ va vb)
+            (= op :-)    (if a2 (- va vb) (- va))
+            (= op :*)    (* va vb)
+            (= op :div)  (/ va vb)
+            (= op :idiv) (quot va vb)
+            (= op :rem)  (rem va vb)
+            (= op :mod)  (mod va vb)
+            (= op :<<)   (bit-shift-left  #?(:clj (long va) :cljs (int va))
+                                          #?(:clj (int  vb) :cljs (int vb)))
+            (= op :>>)   (bit-shift-right #?(:clj (long va) :cljs (int va))
+                                          #?(:clj (int  vb) :cljs (int vb)))
+            (= op :pow)  #?(:clj (Math/pow (double va) (double vb)) :cljs (js/Math.pow va vb))
+            (= op :hat)  #?(:clj (Math/pow (double va) (double vb)) :cljs (js/Math.pow va vb))
+            (= op :abs)  #?(:clj (Math/abs (double va)) :cljs (js/Math.abs va))
+            (= op :max)  (max va vb)
+            (= op :min)  (min va vb)
+            (= op :float)   #?(:clj (double va) :cljs (double va))
+            (= op :integer) #?(:clj (long va) :cljs (int va))
+            :else (throw (ex-info "Unknown arithmetic operator" {:op op}))))
+
+        ;; Unary ground case (abs/float/integer/unary minus)
+        (and (number? r1) (nil? r2))
+        (case op
+          :abs     #?(:clj (Math/abs (double r1)) :cljs (js/Math.abs r1))
+          :float   #?(:clj (double r1) :cljs r1)
+          :integer #?(:clj (long r1) :cljs (int r1))
+          :- (- r1)
+          (throw (ex-info "Unknown unary operator" {:op op})))
+
+        ;; Affine: var + number  /  number + var
+        (and (unb? r1) (number? r2) (= op :+)) [::linear 1 (second r1) r2]
+        (and (number? r1) (unb? r2) (= op :+)) [::linear 1 (second r2) r1]
+        ;; var - number
+        (and (unb? r1) (number? r2) (= op :-)) [::linear 1 (second r1) (- r2)]
+        ;; number - var  →  -1*var + number
+        (and (number? r1) (unb? r2) (= op :-)) [::linear -1 (second r2) r1]
+        ;; number * var  /  var * number
+        (and (number? r1) (unb? r2) (= op :*)) [::linear r1 (second r2) 0]
+        (and (unb? r1) (number? r2) (= op :*)) [::linear r2 (second r1) 0]
+        ;; linear + number  /  number + linear
+        (and (lin? r1) (number? r2) (= op :+))
+        (let [[_ c v k] r1] [::linear c v (+ k r2)])
+        (and (number? r1) (lin? r2) (= op :+))
+        (let [[_ c v k] r2] [::linear c v (+ r1 k)])
+        ;; linear - number
+        (and (lin? r1) (number? r2) (= op :-))
+        (let [[_ c v k] r1] [::linear c v (- k r2)])
+        ;; number * linear
+        (and (number? r1) (lin? r2) (= op :*))
+        (let [[_ c v k] r2] [::linear (* r1 c) v (* r1 k)])
+        (and (lin? r1) (number? r2) (= op :*))
+        (let [[_ c v k] r1] [::linear (* c r2) v (* k r2)])
+
+        :else (throw (ex-info "Non-linear or unevaluable expression" {:term t :r1 r1 :r2 r2}))))
+    :else (throw (ex-info "Non-numeric term in arithmetic" {:term t}))))
+
+(defn- unbound-var?
+  "Return the var name if r is an [::unbound var] sentinel, else nil."
+  [r]
+  (when (and (vector? r) (= (first r) ::unbound)) (second r)))
+
+(defn- clp-op->bound-op
+  "Map a CLP(R) op keyword to the canonical comparison op used by add-numeric-bound."
+  [op]
+  (case op
+    (:clp< :hash<)   :<
+    (:clp> :hash>)   :>
+    (:clp=< :hash=<) :=<
+    (:clp>= :hash>=) :>=
+    (:clp= :hash=)   :=:=
+    (:clp<> :hash<>) :arith-ne
+    op))
+
+(defn- solve-clp-constraint
+  "Handle a CLP(R) or classic comparison op when one or both sides may be unbound.
+   clp-op is the raw op keyword (e.g. :clp< or :<).
+   Returns updated ve or nil on failure."
+  [clp-op lhs rhs ve]
+  (let [r1 (try (resolve-arith lhs ve) (catch #?(:clj clojure.lang.ExceptionInfo :cljs :default) _ nil))
+        r2 (try (resolve-arith rhs ve) (catch #?(:clj clojure.lang.ExceptionInfo :cljs :default) _ nil))
+        uv1 (when r1 (unbound-var? r1))
+        uv2 (when r2 (unbound-var? r2))
+        bound-op (clp-op->bound-op clp-op)]
+    (cond
+      ;; Both ground → evaluate directly
+      (and (number? r1) (number? r2))
+      (case bound-op
+        :<       (when (<  r1 r2) ve)
+        :>       (when (>  r1 r2) ve)
+        :=<      (when (<= r1 r2) ve)
+        :>=      (when (>= r1 r2) ve)
+        :=:=     (when (== r1 r2) ve)
+        :arith-ne (when (not (== r1 r2)) ve)
+        nil)
+
+      ;; lhs is unbound var, rhs is ground → add bound on lhs
+      (and uv1 (number? r2))
+      (vars/add-numeric-bound uv1 bound-op r2 ve)
+
+      ;; rhs is unbound var, lhs is ground → flip the constraint onto rhs
+      (and (number? r1) uv2)
+      (let [flipped (case bound-op
+                      :<       :>
+                      :>       :<
+                      :=<      :>=
+                      :>=      :=<
+                      :=:=     :=:=
+                      :arith-ne :arith-ne
+                      nil)]
+        (when flipped (vars/add-numeric-bound uv2 flipped r1 ve)))
+
+      ;; Both unbound — record relational constraint on lhs referencing rhs,
+      ;; and the flipped constraint on rhs referencing lhs
+      (and uv1 uv2)
+      (let [flipped (case bound-op
+                      :<  :>  :>  :<  :=<  :>=  :>=  :=<
+                      :=:= :=:=  :arith-ne :arith-ne  nil)
+            ve' (vars/add-var-relational-constraint uv1 bound-op uv2 ve)]
+        (if (and ve' flipped)
+          (vars/add-var-relational-constraint uv2 flipped uv1 ve')
+          ve'))
+
+      :else nil)))
+
+;;; ── Expression solver ────────────────────────────────────────────────────────
+
+(defn solve-expression
+  "Solve a built-in arithmetic/comparison goal.
+   Returns lazy-seq of {:var-env :just} maps (no chs change)."
+  [goal ve]
+  (let [op   (:op goal)
+        args (:args goal)]
+    (try
+      (let [result
+            (cond
+              (= op :=)
+              (when-let [ve' (unify/solve-unify (first args) (second args) ve false)]
+                ve')
+              (= op :ne)          ; \=
+              (when-let [ve' (unify/solve-dnunify (first args) (second args) ve)]
+                ve')
+              (= op :is)
+              (let [lhs (first args)
+                    r2  (try (resolve-arith (second args) ve)
+                             (catch #?(:clj clojure.lang.ExceptionInfo :cljs :default) _ nil))]
+                (cond
+                  (number? r2)
+                  (when-let [ve' (unify/solve-unify lhs r2 ve false)]
+                    ve')
+                  ;; rhs is a single unbound var → defer as equality
+                  (and r2 (unbound-var? r2))
+                  (solve-clp-constraint :=:= lhs (second args) ve)
+                  ;; rhs is affine: coeff*Y + offset → store linear-eq on X and Y
+                  (and r2 (vector? r2) (= (first r2) ::linear))
+                  (let [[_ coeff y-var offset] r2]
+                    (vars/add-linear-eq lhs coeff y-var offset ve))
+                  :else nil))
+              (= op :=:=)
+              (solve-clp-constraint :=:= (first args) (second args) ve)
+              (= op :arith-ne)     ; =\=
+              (solve-clp-constraint :arith-ne (first args) (second args) ve)
+              (= op :<)
+              (solve-clp-constraint :< (first args) (second args) ve)
+              (= op :>)
+              (solve-clp-constraint :> (first args) (second args) ve)
+              (= op :=<)
+              (solve-clp-constraint :=< (first args) (second args) ve)
+              (= op :>=)
+              (solve-clp-constraint :>= (first args) (second args) ve)
+              ;; CLP(R) symbolic operators (.<. .>. etc.) and #-aliases
+              (contains? #{:clp< :clp> :clp=< :clp>= :clp= :clp<>
+                           :hash= :hash< :hash> :hash>= :hash=< :hash<>} op)
+              (solve-clp-constraint op (first args) (second args) ve)
+              (= op :term<)
+              (let [v1 (vars/fill-in (first args) ve)
+                    v2 (vars/fill-in (second args) ve)]
+                (when (neg? (compare v1 v2)) ve))
+              (= op :term>)
+              (let [v1 (vars/fill-in (first args) ve)
+                    v2 (vars/fill-in (second args) ve)]
+                (when (pos? (compare v1 v2)) ve))
+              (= op :term<=)
+              (let [v1 (vars/fill-in (first args) ve)
+                    v2 (vars/fill-in (second args) ve)]
+                (when (not (pos? (compare v1 v2))) ve))
+              (= op :term>=)
+              (let [v1 (vars/fill-in (first args) ve)
+                    v2 (vars/fill-in (second args) ve)]
+                (when (not (neg? (compare v1 v2))) ve))
+              ;; not(is(X,E)) → disequality on arithmetic result
+              (and (= op :not)
+                   (let [inner (first args)]
+                     (and (term/is-compound? inner) (= (:op inner) :is))))
+              (let [inner (first args)
+                    r2    (try (resolve-arith (second (:args inner)) ve)
+                               (catch #?(:clj clojure.lang.ExceptionInfo :cljs :default) _ nil))]
+                (when (number? r2)
+                  (unify/solve-dnunify (first (:args inner)) r2 ve)))
+              :else nil)]
+        (when result
+          [{:var-env result :just goal}]))
+      (catch #?(:clj clojure.lang.ExceptionInfo :cljs :default) _
+        []))))
+
+;;; ── Forall solver ────────────────────────────────────────────────────────────
+
+(defn solve-forall
+  "Solve forall(V, Goal) universally quantified over V.
+
+   Mirrors solve_forall/solve_forall2/solve_forall3 in solve.pl:
+   1. If V already bound, solve Goal normally.
+   2. Mark V non-bindable and non-loop, then solve Goal once.
+   3. After Goal succeeds:
+      - V still unbound with no new constraints → universal success.
+      - V acquired new disequality constraints (values it must not be)
+        → must re-verify Goal holds with V bound to each of those values.
+      - V got bound → fail (forall requires V to remain free)."
+  [v-name goal ve chs call-stack in-nmr? program]
+  (let [orig-cs (vars/is-unbound? v-name ve)]
+    (if-not orig-cs
+      ;; V already bound → solve goal normally
+      (solve-goals [goal] ve chs call-stack in-nmr? program)
+      ;; V unbound: mark non-bindable + non-loop, then solve Goal once
+      (let [marked (assoc orig-cs :bindable? false :loop-var -1)
+            ve1    (vars/update-var-value v-name marked ve)
+            body-results (solve-goals [goal] ve1 chs call-stack in-nmr? program)]
+        ;; Vacuous truth: no counterexample exists → forall trivially succeeds
+        (if (empty? body-results)
+          [(mk-result ve chs {:forall v-name :body :vacuous} [])]
+          (lazy-seq
+            (mapcat
+              (fn [{ve2 :var-env chs1 :chs just :just el :even-loops}]
+                (let [cur-cs (vars/is-unbound? v-name ve2)]
+                  (cond
+                    ;; V still unbound with no new constraints → success
+                    (and cur-cs (empty? (set/difference
+                                          (:constraints cur-cs)
+                                          (:constraints orig-cs))))
+                    [(mk-result ve2 chs1 {:forall v-name :body just} el)]
+
+                    ;; V acquired new disequality constraints → re-verify for each
+                    cur-cs
+                    (let [new-vals (set/difference
+                                     (:constraints cur-cs)
+                                     (:constraints orig-cs))]
+                      (when (every? (fn [val]
+                                      (let [ve3 (vars/update-var-value v-name {:val val} ve2)
+                                            g2  (term/substitute v-name val goal)]
+                                        (seq (solve-goals [g2] ve3 chs1 call-stack in-nmr? program))))
+                                    new-vals)
+                        [(mk-result ve2 chs1 {:forall v-name :body just} el)]))
+
+                    ;; V got bound → fail
+                    :else [])))
+              body-results)))))))
+
+;;; ── Goal dispatcher ──────────────────────────────────────────────────────────
+
+(defn- prepend-just
+  "Cons j1 onto j2, producing a flat sequence of justification nodes."
+  [j1 j2]
+  (cond
+    (or (nil? j1) (= j1 :success)) j2
+    (or (nil? j2) (= j2 :success)) j1
+    (sequential? j2)               (into [j1] j2)
+    :else                          [j1 j2]))
+
+(defn- solve-goals*
+  [goals ve chs call-stack in-nmr? even-loops program]
+  (if (empty? goals)
+    [(mk-result ve chs :success [])]
+    (lazy-seq
+      (mapcat
+        (fn [{ve' :var-env chs' :chs just1 :just el :even-loops}]
+          (let [el' (into even-loops el)]
+            (map (fn [r2] (-> r2
+                              (update :even-loops into el)
+                              (update :just #(prepend-just just1 %))))
+                 (solve-goals* (rest goals) ve' chs' call-stack in-nmr? el' program))))
+        (solve-goal (first goals) ve chs call-stack in-nmr? even-loops program)))))
+
+(defn solve-goals
+  "Solve a list of goals.  Returns lazy-seq of result maps."
+  [goals ve chs call-stack in-nmr? program]
+  (solve-goals* goals ve chs call-stack in-nmr? [] program))
+
+;;; ── findall/3 ────────────────────────────────────────────────────────────────
+
+(defn- solve-findall
+  "findall(Template, Goal, List): collect all Template instances for which Goal
+   succeeds into List.  Always succeeds (returns [] if Goal fails)."
+  [template goal-term list-arg ve chs call-stack in-nmr? program]
+  (let [solutions (solve-goals [goal-term] ve chs call-stack in-nmr? program)
+        bag       (mapv (fn [{ve' :var-env}]
+                          (vars/fill-in template ve'))
+                        solutions)
+        ;; Build a Prolog-style list term from bag
+        list-term (reduce (fn [acc item]
+                            {:op :cons :args [item acc]})
+                          (keyword "[]")
+                          (reverse bag))]
+    (when-let [ve' (unify/solve-unify list-arg list-term ve false)]
+      [(mk-result ve' chs {:findall template} [])])))
+
+;;; ── Goal dispatcher ──────────────────────────────────────────────────────────
+
+(defn solve-goal
+  "Dispatch a single goal to the appropriate solver."
+  [goal ve chs call-stack in-nmr? even-loops program]
+  (cond
+    ;; forall(V, G)
+    (term/is-forall? goal)
+    (let [[v g] (:args goal)]
+      (solve-forall v g ve chs call-stack in-nmr? program))
+
+    ;; findall(Template, Goal, List)
+    (and (term/is-compound? goal) (= (:op goal) :findall) (= (count (:args goal)) 3))
+    (let [[tmpl g lst] (:args goal)]
+      (or (solve-findall tmpl g lst ve chs call-stack in-nmr? program) []))
+
+    ;; call(Goal) or call(Goal, Arg…) — partial application
+    (and (term/is-compound? goal) (= (:op goal) :call) (pos? (count (:args goal))))
+    (let [called (vars/fill-in (first (:args goal)) ve)
+          extra  (rest (:args goal))
+          ;; If extra args, extend the called term's arg list
+          effective (if (seq extra)
+                      (if (term/is-compound? called)
+                        (update called :args into extra)
+                        (throw (ex-info "call/N: first arg must be compound" {:called called})))
+                      called)]
+      (solve-goal effective ve chs call-stack in-nmr? even-loops program))
+
+    ;; true/0
+    (and (term/is-compound? goal) (= (:op goal) :true) (empty? (:args goal)))
+    [(mk-result ve chs :success [])]
+
+    ;; false/0 or fail/0
+    (and (term/is-compound? goal)
+         (or (= (:op goal) :false) (= (:op goal) :fail))
+         (empty? (:args goal)))
+    []
+
+    ;; Arithmetic / comparison expression
+    (term/is-expr? goal)
+    (map (fn [{ve' :var-env just :just}]
+           (mk-result ve' chs just []))
+         (solve-expression goal ve))
+
+    ;; NAF or regular predicate
+    (term/is-compound? goal)
+    (solve-predicate goal ve chs call-stack in-nmr? even-loops program)
+
+    :else
+    (throw (ex-info "Unknown goal type" {:goal goal}))))
+
+;;; ── Predicate solver ─────────────────────────────────────────────────────────
+
+(defn solve-predicate
+  "Solve a predicate goal (positive, NAF-wrapped, or strong-negation)."
+  [goal ve chs call-stack in-nmr? even-loops program]
+  (let [[functor args]
+        (cond
+          (term/is-naf? goal)
+          (let [inner (first (:args goal))]
+            [(term/negate-functor (term/term-functor inner)) (:args inner)])
+          (term/is-sneg? goal)
+          (let [inner (first (:args goal))]
+            [(term/strong-negate-functor (term/term-functor inner)) (:args inner)])
+          :else
+          [(term/term-functor goal) (:args goal)])
+        effective-goal
+        (cond
+          (term/is-naf? goal)
+          (term/make-compound (term/functor-name-str functor) args)
+          (term/is-sneg? goal)
+          (term/make-compound (term/functor-name-str functor) args)
+          :else goal)]
+    (lazy-seq
+      (mapcat
+        (fn [{:keys [result var-env even-loop]}]
+          (case result
+            :coinductive-success
+            [(mk-result var-env chs {:chs-success goal}
+                        (if even-loop [even-loop] []))]
+            :not-present
+            (expand-call effective-goal functor args var-env chs call-stack in-nmr? even-loops program)
+            []))
+        (chs/check-chs functor args ve chs call-stack)))))
+
+;;; ── Rule expansion ───────────────────────────────────────────────────────────
+
+(defn expand-call
+  "Expand a predicate call by looking up rules and trying each.
+   If the functor is abducible and has no rules, succeed with goal added to CHS."
+  [goal functor args ve chs call-stack in-nmr? even-loops program]
+  (let [cvars            (collect-cvars even-loops)
+        [entry chs1 ve1] (chs/add-to-chs functor args false in-nmr? chs ve cvars)
+        rules            (prog/defined-rules functor program)
+        new-stack        (into [{:goal goal :rule nil}] call-stack)]
+    (if (and (empty? rules) (prog/abducible? functor program))
+      ;; Abducible with no rules: succeed, recording goal as assumed true
+      (let [chs2          (chs/remove-from-chs entry functor chs1)
+            [_ chs3 _ve3] (chs/add-to-chs functor args true in-nmr? chs2 ve1 cvars)]
+        [(mk-result ve1 chs3 {:abduced goal} [])])
+      (lazy-seq
+        (mapcat
+          (fn [{ve2 :var-env chs2 :chs just :just el :even-loops}]
+            (let [chs3           (chs/remove-from-chs entry functor chs2)
+                  [_ chs4 _ve4]  (chs/add-to-chs functor args true in-nmr? chs3 ve2 cvars)]
+              [(mk-result ve2 chs4 just el)]))
+          (expand-call2 goal rules ve1 chs1 new-stack in-nmr? program))))))
+
+(defn expand-call2
+  "Try each rule in turn; yield results for matching rules."
+  [goal rules ve chs call-stack in-nmr? program]
+  (if (empty? rules)
+    []
+    (lazy-seq
+      (let [{:keys [head body]} (first rules)]
+        (concat
+          ;; Try this rule
+          (let [[h2 b2 ve'] (vars/get-unique-vars head body ve)
+                ve''        (unify/solve-unify goal h2 ve' false)]
+            (when ve''
+              (map (fn [r]
+                     (update r :just (fn [j] {:rule h2 :sub-just j})))
+                   (solve-goals b2 ve'' chs call-stack in-nmr? program))))
+          ;; Try remaining rules
+          (expand-call2 goal (rest rules) ve chs call-stack in-nmr? program))))))
+
+;;; ── DCC (Denial Consistency Check) ──────────────────────────────────────────
+
+(defn- run-dcc
+  "Post-query check for integrity constraints with variables.
+   For each _false/0 rule, solve its body with fresh alpha-renamed vars
+   against the result's var-env and chs. If any body succeeds, fail the branch.
+   Abducibles are disabled during DCC — only existing rules and CHS entries count."
+  [result program]
+  (let [false-rules (prog/defined-rules "_false/0" program)]
+    (if (empty? false-rules)
+      [result]
+      (let [{:keys [var-env chs]} result
+            ;; Run DCC against the result's CHS so abduced facts are visible,
+            ;; but strip abducibles to prevent new abductions during the check.
+            dcc-program (assoc program :abducibles #{})]
+        (if (every? (fn [{:keys [head body]}]
+                      (let [[_ renamed-body ve'] (vars/get-unique-vars head body var-env)
+                            solutions (solve-goals renamed-body ve' chs [] false dcc-program)]
+                        (empty? solutions)))
+                    false-rules)
+          [result]
+          [])))))
+
+;;; ── Top-level entry ──────────────────────────────────────────────────────────
+
+(defn run-query
+  "Run the program query with NMR check, then apply DCC.
+   Returns a lazy sequence of {:var-env :chs :just :even-loops}."
+  [program]
+  (let [query  (prog/defined-query program)
+        nmr    (prog/defined-nmr-check program)
+        goals  (into (vec query) nmr)
+        ve     (vars/new-var-env)
+        ch     (chs/new-chs)]
+    (mapcat #(run-dcc % program)
+            (solve-goals goals ve ch [] false program))))
