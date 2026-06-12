@@ -204,12 +204,52 @@
         ;; Assert outer dual: not_p(A…) :- inner_1(A…), inner_2(A…), …
         (prog/assert-rule (prog/make-rule dh inner-goals) prog')))))
 
+;;; ── Predicate references in bodies ───────────────────────────────────────────
+
+(defn goal-predicate-functors
+  "Collect the user-predicate functor strings *called* within goal g, recursing
+   through not/forall/findall wrappers.  Arithmetic/comparison builtins, call/N
+   and structurally non-predicate goals contribute nothing.  Conservative: a
+   functor it fails to collect simply doesn't get a generated dual (no
+   regression, just no extra dual)."
+  [g]
+  (cond
+    (not (term/is-compound? g))          #{}
+    (term/is-naf? g)                     (goal-predicate-functors (first (:args g)))
+    (term/is-forall? g)                  (goal-predicate-functors (second (:args g)))
+    (and (= (:op g) :findall)
+         (= 3 (count (:args g))))        (goal-predicate-functors (second (:args g)))
+    (term/is-expr? g)                    #{}
+    (= (:op g) :call)                    #{}
+    (term/is-sneg? g)                    #{}
+    :else                                #{(term/term-functor g)}))
+
+(defn- called-functors
+  "All user-predicate functors referenced in any rule body or the query."
+  [prog]
+  (reduce-kv
+   (fn [acc _ rules]
+     (reduce (fn [a {:keys [body]}]
+               (reduce (fn [a2 goal] (into a2 (goal-predicate-functors goal))) a body))
+             acc rules))
+   (reduce (fn [a goal] (into a (goal-predicate-functors goal)))
+           #{} (prog/defined-query prog))
+   (:rules prog)))
+
 ;;; ── compile-duals entry point ────────────────────────────────────────────────
 
 (defn compile-duals
-  "Add dual rules for every user predicate in prog.  Returns updated program."
+  "Add dual rules for every user predicate in prog.  Returns updated program.
+
+   Covers both predicates with rules (head functors) AND predicates that are
+   only *called* but never defined: an undefined predicate q never holds, so its
+   dual not_q must hold universally.  comp-dual with an empty rule list already
+   produces exactly that (not_q as a fact), so we simply feed the called-but-
+   undefined functors through the same path.  Without this, `not q(X)` for an
+   undefined q would have no dual to resolve and wrongly fail."
   [prog]
-  (let [preds (prog/defined-predicates prog)]
+  (let [head-preds (prog/defined-predicates prog)
+        all-preds  (into head-preds (called-functors prog))]
     (reduce (fn [p f]
               (if (or (prog/scasp-builtin? f)
                       (prog/headless-functor? f)
@@ -217,4 +257,4 @@
                 p
                 (comp-dual f (prog/defined-rules f p) p)))
             prog
-            preds)))
+            all-preds)))

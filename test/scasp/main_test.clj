@@ -168,18 +168,31 @@
     (is (= 1 (count res-tweety)))
     (is (= 0 (count res-sam)))))
 
-;;; ── solve-forall vacuous truth ───────────────────────────────────────────────
+;;; ── solve-forall soundness ───────────────────────────────────────────────────
 
-(deftest forall-vacuous-truth-test
-  ;; forall(X, impossible(X)) should succeed when impossible/1 has no facts.
-  ;; In dual form this appears as a generated forall in the dual of a rule.
-  ;; We test it directly via a program that would expose vacuous forall:
-  ;;   p :- forall(X, q(X)).
-  ;;   (no q facts)
-  ;;   ?- p.   % should succeed vacuously
-  (let [rules [(r (c :p) {:op :forall :args ["X" (c :q "X")]})]
-        results (main/solve-all rules [(c :p)])]
-    (is (seq results))))
+(deftest forall-positive-not-vacuous-test
+  ;; p :- forall(X, q(X)).   (no q facts)   ?- p.
+  ;; Must FAIL: "for all X, q(X)" is false when q holds for no X (the Herbrand
+  ;; universe is non-empty).  Verified against SWI/Ciao s(CASP): no model under
+  ;; any forall algorithm.  (Previously this engine wrongly succeeded here via a
+  ;; spurious "vacuous truth" branch.)
+  (let [rules [(r (c :p) {:op :forall :args ["X" (c :q "X")]})]]
+    (is (empty? (main/solve-all rules [(c :p)]))))
+  ;; forall(X, q(cA,X)) where q has SOME but not all instances → also FAIL.
+  (let [rules [(r (c :q :cA :a)) (r (c :q :cA :b)) (r (c :p :nobody))
+               (r (c :p :go) {:op :forall :args ["X" (c :q :cA "X")]})]]
+    (is (empty? (main/solve-all rules [(c :p :go)])))))
+
+(deftest not-undefined-predicate-test
+  ;; An undefined predicate q never holds, so `not q(X)` holds universally
+  ;; (its generated dual is always true).  This is the genuine case the old
+  ;; vacuous-truth branch was masking.  Verified against SWI/Ciao s(CASP).
+  ;;   r :- q(X).   (q undefined)   ?- not r.   % holds
+  (let [rules [(r (c :r) (c :q "X"))]]
+    (is (seq (main/solve-all rules [{:op :not :args [(c :r)]}]))))
+  ;; not q(X) directly, q undefined → holds
+  (let [rules [(r (c :dummy :x))]]
+    (is (seq (main/solve-all rules [{:op :not :args [(c :q "X")]}])))))
 
 ;;; ── Strong negation ──────────────────────────────────────────────────────────
 

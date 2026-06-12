@@ -93,6 +93,52 @@ Usage: `(main/solve-all rules query #{} {:no-nmr true})`
 
 ---
 
+## NAF soundness fixes + known limitation (as of 2026-06-12)
+
+Two `forall`/NAF soundness bugs fixed; one harder case documented as a known
+limitation. Reference behavior was checked empirically against SWI s(CASP) 1.1.4.
+
+**Background — how the references differ.** s(CASP) has several `forall`
+algorithms. SWI's *default* (`scasp_forall=all`, the constructive Arias et al.
+algorithm) is **unsound** on duals with multiple existential body variables — it
+leaks `not p` where `p` is derivable. Only the older Ciao algorithms
+(`--prev_forall` / `--sasp_forall`) are sound on that pattern. This port's
+`solve-forall` mirrors the Ciao `solve_forall/2/3` family (the sound one).
+
+### Fixed — unsound vacuous-truth in `solve-forall` (`solver.clj`)
+
+`forall(V, Goal)` froze `V`, solved `Goal` once, and on **no** solution returned
+*success* ("vacuous truth"). That is unsound: `forall(V, p(V))` for a defined `p`
+that simply can't unify `V` with a witness (e.g. `forall(V, claims(cA,V))`)
+wrongly succeeded. SWI/Ciao give **no model** here under every algorithm. Fixed:
+empty body-results → the forall **fails** (mirrors Ciao `solve_forall`).
+
+### Fixed — duals for called-but-undefined predicates (`duals.clj`)
+
+`compile-duals` only generated duals for *head* predicates. A predicate called
+(in a body, or under `not`) but never defined had no `not_q` dual, so `not q(X)`
+**failed** instead of succeeding universally (an undefined `q` never holds, so
+`not q` always holds — confirmed against SWI). `compile-duals` now also feeds
+called-but-undefined functors (collected via `goal-predicate-functors`) through
+the existing empty-rules path, which emits `not_q` as a fact. This is also what
+the old vacuous-truth branch was masking — the two fixes are complementary.
+
+### Known limitation — NAF over rules with MULTIPLE existential body vars
+
+`not p` is **still unsound** when `p` is defined by a rule whose body has two or
+more existential variables across multiple literals, e.g.
+`overridden(E,A) :- claims(E,S1,A), claims(E,S2,B), outranks(B,A)`. Minimal:
+`bad(E) :- claims(E,S1), claims(E,S2), diff(S1,S2)` — `bad(:cA)` holds yet
+`not bad(:cA)` also (wrongly) holds. **SWI's default forall leaks the same way**;
+fixing it requires threading constraints onto outer forall vars during
+re-verification AND using a clean coinductive context per re-verification (the
+CHS success memo otherwise grants spurious coinductive success at each nesting
+level). This is a larger engine change deferred by decision; until then, encode
+such "not overridden by a higher-authority source" patterns without relying on
+NAF over a multi-existential rule.
+
+---
+
 ## Three remaining solver gaps (no parser needed)
 
 ### Gap 1 — `is/2` with compound unbound RHS ✅ Fixed

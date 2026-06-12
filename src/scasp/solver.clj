@@ -281,9 +281,15 @@
       (let [marked (assoc orig-cs :bindable? false :loop-var -1)
             ve1    (vars/update-var-value v-name marked ve)
             body-results (solve-goals [goal] ve1 chs call-stack in-nmr? program)]
-        ;; Vacuous truth: no counterexample exists → forall trivially succeeds
+        ;; If Goal has no solution with V free, the universal claim fails.
+        ;; (Mirrors Ciao solve_forall, where a failing solve_goals fails the
+        ;; whole forall.  There is NO vacuous-truth success: a positive goal
+        ;; that holds only by binding V means "for all V, G" is false.  The
+        ;; genuine "always true" cases — e.g. not_q for an undefined q — already
+        ;; produce a real solution with V free via their generated dual, so they
+        ;; never reach this branch.)
         (if (empty? body-results)
-          [(mk-result ve chs {:forall v-name :body :vacuous} [])]
+          []
           (lazy-seq
             (mapcat
               (fn [{ve2 :var-env chs1 :chs just :just el :even-loops}]
