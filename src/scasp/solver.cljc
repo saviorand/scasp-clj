@@ -263,6 +263,29 @@
 
 ;;; ── Forall solver ────────────────────────────────────────────────────────────
 
+(defn- solve-forall3
+  "Re-verify Goal with V bound, in turn, to each value in vals, THREADING the
+   var-env through the sequence (mirrors solve_forall3/11 in solve.pl).
+
+   Threading the var-env is load-bearing: re-verifying V=val may succeed only by
+   constraining ANOTHER (outer) universally-quantified variable, and those
+   constraints must propagate so the enclosing forall can in turn check the
+   values it now excludes.  The CHS is NOT threaded between values: each value's
+   body proof is an INDEPENDENT coinductive derivation and must start from the
+   entry CHS, else one value's success entries grant a sibling spurious
+   coinductive success.  Returns a (possibly empty) seq; empty means some value
+   had no solution → the universal claim over V fails."
+  [v-name vals goal ve chs call-stack in-nmr? program]
+  (if (empty? vals)
+    [(mk-result ve chs :success [])]
+    (let [g2 (term/substitute v-name (first vals) goal)]
+      (mapcat
+        (fn [{ve' :var-env el :even-loops}]
+          (map (fn [r] (update r :even-loops into el))
+               (solve-forall3 v-name (rest vals) goal ve' chs
+                              call-stack in-nmr? program)))
+        (solve-goals [g2] ve chs call-stack in-nmr? program)))))
+
 (defn solve-forall
   "Solve forall(V, Goal) universally quantified over V.
 
@@ -272,10 +295,21 @@
    3. After Goal succeeds:
       - V still unbound with no new constraints → universal success.
       - V acquired new disequality constraints (values it must not be)
-        → must re-verify Goal holds with V bound to each of those values.
-      - V got bound → fail (forall requires V to remain free)."
-  [v-name goal ve chs call-stack in-nmr? program]
-  (let [orig-cs (vars/is-unbound? v-name ve)]
+        → must re-verify Goal holds with V bound to each of those values,
+          THREADING any constraints picked up on other forall variables.
+      - V got bound → fail (forall requires V to remain free).
+
+   Before anything else V (and its occurrences in Goal) is alpha-renamed to a
+   fresh variable — mirrors `my_copy_term(Var, Goal, …)` in solve.pl.  Without
+   this, a nested or repeated forall that reuses the same source variable name
+   inherits residual disequality constraints left in the var-env by an earlier
+   forall over that name, so its \"new constraints\" set comes out empty and it
+   wrongly reports universal success."
+  [v-name0 goal0 ve chs call-stack in-nmr? program]
+  (let [[v-name ve*] (vars/generate-unique-var v-name0 ve)
+        goal          (term/substitute v-name0 v-name goal0)
+        ve            ve*
+        orig-cs (vars/is-unbound? v-name ve)]
     (if-not orig-cs
       ;; V already bound → solve goal normally
       (solve-goals [goal] ve chs call-stack in-nmr? program)
@@ -303,17 +337,21 @@
                                           (:constraints orig-cs))))
                     [(mk-result ve2 chs1 {:forall v-name :body just} el)]
 
-                    ;; V acquired new disequality constraints → re-verify for each
+                    ;; V acquired new disequality constraints → re-verify for
+                    ;; each, threading constraints picked up on other forall vars
+                    ;; so the enclosing forall sees them.  Re-verify against the
+                    ;; post-first-solve chs1: each value check is an independent
+                    ;; proof of the body, so the first solve's sibling success
+                    ;; entries must not grant it spurious coinductive success.
                     cur-cs
                     (let [new-vals (set/difference
                                      (:constraints cur-cs)
                                      (:constraints orig-cs))]
-                      (when (every? (fn [val]
-                                      (let [ve3 (vars/update-var-value v-name {:val val} ve2)
-                                            g2  (term/substitute v-name val goal)]
-                                        (seq (solve-goals [g2] ve3 chs1 call-stack in-nmr? program))))
-                                    new-vals)
-                        [(mk-result ve2 chs1 {:forall v-name :body just} el)]))
+                      (map (fn [{ve3 :var-env chs3 :chs el3 :even-loops}]
+                             (mk-result ve3 chs3 {:forall v-name :body just}
+                                        (into el el3)))
+                           (solve-forall3 v-name (vec new-vals) goal
+                                          ve2 chs call-stack in-nmr? program)))
 
                     ;; V got bound → fail
                     :else [])))

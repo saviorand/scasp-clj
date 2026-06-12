@@ -93,17 +93,20 @@ Usage: `(main/solve-all rules query #{} {:no-nmr true})`
 
 ---
 
-## NAF soundness fixes + known limitation (as of 2026-06-12)
+## NAF soundness fixes (as of 2026-06-12)
 
-Two `forall`/NAF soundness bugs fixed; one harder case documented as a known
-limitation. Reference behavior was checked empirically against SWI s(CASP) 1.1.4.
+Four `forall`/NAF soundness bugs fixed; constructive negation over rules with
+existential body variables is now sound, including the multiple-existential case.
+Reference behavior was checked empirically against SWI s(CASP) 1.1.4 (both as a
+leak-detector and to confirm no valid `not`-successes were lost).
 
 **Background — how the references differ.** s(CASP) has several `forall`
 algorithms. SWI's *default* (`scasp_forall=all`, the constructive Arias et al.
 algorithm) is **unsound** on duals with multiple existential body variables — it
 leaks `not p` where `p` is derivable. Only the older Ciao algorithms
 (`--prev_forall` / `--sasp_forall`) are sound on that pattern. This port's
-`solve-forall` mirrors the Ciao `solve_forall/2/3` family (the sound one).
+`solve-forall` mirrors the Ciao `solve_forall/2/3` family (the sound one), and
+now reproduces its answers on the patterns tested.
 
 ### Fixed — unsound vacuous-truth in `solve-forall` (`solver.clj`)
 
@@ -123,19 +126,31 @@ called-but-undefined functors (collected via `goal-predicate-functors`) through
 the existing empty-rules path, which emits `not_q` as a fact. This is also what
 the old vacuous-truth branch was masking — the two fixes are complementary.
 
-### Known limitation — NAF over rules with MULTIPLE existential body vars
+### Fixed — `forall` re-verification threading (`solver.clj`)
 
-`not p` is **still unsound** when `p` is defined by a rule whose body has two or
-more existential variables across multiple literals, e.g.
-`overridden(E,A) :- claims(E,S1,A), claims(E,S2,B), outranks(B,A)`. Minimal:
-`bad(E) :- claims(E,S1), claims(E,S2), diff(S1,S2)` — `bad(:cA)` holds yet
-`not bad(:cA)` also (wrongly) holds. **SWI's default forall leaks the same way**;
-fixing it requires threading constraints onto outer forall vars during
-re-verification AND using a clean coinductive context per re-verification (the
-CHS success memo otherwise grants spurious coinductive success at each nesting
-level). This is a larger engine change deferred by decision; until then, encode
-such "not overridden by a higher-authority source" patterns without relying on
-NAF over a multi-existential rule.
+When re-verifying `forall(V, G)` for each value `V` excludes, the body may hold
+only by constraining ANOTHER (outer) universally-quantified variable. The old
+re-verify discarded the var-env, dropping those constraints, so a nested
+`forall` over multiple existentials leaked. `solve-forall3` now threads the
+var-env across values (so outer-var constraints accumulate) while keeping the
+CHS independent per value (a sibling value's success entries must not grant
+spurious coinductive success).
+
+### Fixed — `forall` variable freshening (`solver.clj`)
+
+`solve-forall` now alpha-renames the universal variable `V` (and its occurrences
+in `Goal`) to a fresh name on entry — mirroring `my_copy_term(Var, Goal, …)` in
+solve.pl. This was the root cause of the multi-existential leak: a nested forall
+reusing the same source variable name (e.g. the inner `S1` of a re-verify)
+inherited residual disequality constraints left in the var-env by an earlier
+forall over that name, so its "new constraints" set came out empty and it
+wrongly reported universal success.
+
+Together these make the motivating pattern sound:
+`overridden(E,A) :- claims(E,S1,A), claims(E,S2,B), outranks(B,A)` with
+`authoritative(E,S) :- claims(E,S,A), not overridden(E,A)` now yields only the
+highest-authority source (matches Ciao `--sasp_forall`). Covered by
+`naf-multi-existential-test` and `naf-single-existential-test`.
 
 ---
 

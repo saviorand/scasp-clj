@@ -194,6 +194,53 @@
   (let [rules [(r (c :dummy :x))]]
     (is (seq (main/solve-all rules [{:op :not :args [(c :q "X")]}])))))
 
+(deftest naf-single-existential-test
+  ;; Soundness of `not p` when p is defined by a rule with ONE existential
+  ;; body variable.  q(X) :- r(X,Y).  (Y existential)
+  ;;   r(a,b). item(a). item(c).  q(a) holds (via r(a,b)).
+  ;;   s(X) :- item(X), not q(X).   ?- s(X).  → only c (a is ruled out).
+  (let [rules [(r (c :r :a :b)) (r (c :item :a)) (r (c :item :c)) (r (c :q :nobody))
+               (r (c :q "X") (c :r "X" "Y"))
+               (r (c :s "X") (c :item "X") {:op :not :args [(c :q "X")]})]]
+    (is (seq (main/solve-all rules [(c :q :a)])))                         ; q(a) holds
+    (is (empty? (main/solve-all rules [{:op :not :args [(c :q :a)]}])))   ; not q(a) fails
+    (let [xs (set (map #(get (main/result-bindings % ["X"]) "X")
+                       (main/solve-all rules [(c :s "X")])))]
+      (is (= #{:c} xs)))))
+
+(deftest naf-multi-existential-test
+  ;; Soundness of `not p` when p is a rule with MULTIPLE existential body vars
+  ;; across multiple literals — the hard case (constructive negation must
+  ;; universally quantify ALL existentials).  Verified against Ciao s(CASP)
+  ;; (--prev_forall / --sasp_forall): the sound answer.
+  ;;   bad(E) :- claims(E,S1), claims(E,S2), diff(S1,S2).   (S1,S2 existential)
+  (let [rules [(r (c :claims :cA :sA)) (r (c :claims :cA :sB))
+               (r (c :diff :sA :sB)) (r (c :diff :sB :sA)) (r (c :bad :nobody))
+               (r (c :bad "E") (c :claims "E" "S1") (c :claims "E" "S2") (c :diff "S1" "S2"))]]
+    (is (seq (main/solve-all rules [(c :bad :cA)])))                        ; bad(cA) holds
+    (is (empty? (main/solve-all rules [{:op :not :args [(c :bad :cA)]}])))) ; not bad(cA) fails
+  ;; Authoritative-scope reconciliation (the motivating case):
+  ;;   overridden(E,A) :- claims(E,S1,A), claims(E,S2,B), outranks(B,A).
+  ;;   authoritative(E,S) :- claims(E,S,A), not overridden(E,A).
+  ;; Only the highest-authority scope's source is authoritative.
+  (let [rules [(r (c :claims :customAudit :sourceA :single_tss))
+               (r (c :claims :customAudit :sourceB :all_tss))
+               (r (c :outranks :single_tss :all_tss))
+               (r (c :claims :clusterKeyGen :sourceA :initial_only))
+               (r (c :claims :clusterKeyGen :sourceB :ongoing))
+               (r (c :outranks :initial_only :ongoing))
+               (r (c :overridden :nobody :nothing))
+               (r (c :overridden "E" "A")
+                  (c :claims "E" "S1" "A") (c :claims "E" "S2" "B") (c :outranks "B" "A"))
+               (r (c :authoritative "E" "S")
+                  (c :claims "E" "S" "A") {:op :not :args [(c :overridden "E" "A")]})]
+        auth (fn [e] (set (map #(get (main/result-bindings % ["S"]) "S")
+                               (main/solve-all rules [(c :authoritative e "S")]))))]
+    (is (seq (main/solve-all rules [(c :overridden :customAudit :all_tss)])))      ; overridden holds
+    (is (empty? (main/solve-all rules [(c :overridden :customAudit :single_tss)]))) ; top not overridden
+    (is (= #{:sourceA} (auth :customAudit)))
+    (is (= #{:sourceA} (auth :clusterKeyGen)))))
+
 ;;; ── Strong negation ──────────────────────────────────────────────────────────
 
 (defn- sneg [g] {:op :sneg :args [g]})

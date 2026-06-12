@@ -5,6 +5,43 @@ Programming solver under stable model semantics with constraints. Programs are
 built as Clojure data structures (no parser). See [PLAN.md](PLAN.md) for the
 architecture and implementation status.
 
+## Semantics & divergence from upstream
+
+This engine targets the same semantics as Ciao/SWI s(CASP) (top-down,
+grounding-free, stable models with constraints), but a few points differ from
+the reference implementations. Reference behavior below was checked empirically
+against **SWI s(CASP) 1.1.4** and the Ciao algorithm variants.
+
+- **Constructive negation over existentials follows Ciao's *sound* `forall`, not
+  SWI's default.** s(CASP) ships multiple `forall` algorithms. SWI's default
+  (`scasp_forall=all`, the constructive Arias et al. algorithm) is **unsound** on
+  `not p` where `p` is a rule with multiple existential body variables — it
+  admits models in which a derivable atom is treated as false. Only Ciao's older
+  `--prev_forall` / `--sasp_forall` are sound there. This engine matches the
+  **sound** behavior. Consequence: on such programs our answer set can differ
+  from what the *default* SWI CLI prints — intentionally, in the sound direction.
+  (Verified equal to Ciao `--sasp_forall` on the patterns we test; we don't claim
+  full cross-program equivalence — there's no parser to run the upstream corpus.)
+
+- **No vacuous-truth `forall`.** `forall(V, G)` fails if `G` has no solution with
+  `V` free; `forall(V, p(V))` for a non-empty Herbrand universe where `p` holds
+  for no `V` is **false**, not vacuously true. Matches Ciao `solve_forall`.
+
+- **Negation of an undefined predicate succeeds.** An undefined `q` never holds
+  (completion), so `not q(X)` holds universally — its generated dual is always
+  true. Matches s(CASP).
+
+- **No Prolog parser (yet).** Programs are built as Clojure data
+  (`{:op :p :args [...]}`, keyword constants, string variables), not parsed from
+  `.pl` text. This is structural, not a semantic difference, but it means the
+  upstream `#include`/operator/syntax surface isn't available.
+
+- **Known solver gaps** (not divergences, just unimplemented corners) are tracked
+  in [PLAN.md](PLAN.md) — e.g. some CLP(R) constraint propagation across rule
+  boundaries.
+
+The detailed NAF/`forall` soundness fix log lives in [PLAN.md](PLAN.md).
+
 ## Performance
 
 The solver uses **first-argument clause indexing** (mirroring the WAM indexing
