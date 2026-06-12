@@ -92,9 +92,16 @@
      [e chs' ve'])))
 
 (defn remove-from-chs
-  "Remove a specific entry (by identity) from the CHS."
+  "Remove a specific entry (by identity) from the CHS.
+   Entries are added/removed in LIFO (DFS) order, so the target is almost always
+   the last element — pop it in O(1); fall back to a linear rebuild otherwise."
   [entry functor chs]
-  (update chs functor (fn [es] (vec (remove #(identical? % entry) es)))))
+  (update chs functor
+          (fn [es]
+            (cond
+              (empty? es)               es
+              (identical? (peek es) entry) (pop es)
+              :else (vec (remove #(identical? % entry) es))))))
 
 ;;; ── Dual CHS helpers ─────────────────────────────────────────────────────────
 

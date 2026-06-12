@@ -454,7 +454,9 @@
   [goal functor args ve chs call-stack in-nmr? even-loops program]
   (let [cvars            (collect-cvars even-loops)
         [entry chs1 ve1] (chs/add-to-chs functor args false in-nmr? chs ve cvars)
-        rules            (prog/defined-rules functor program)
+        goal-key         (if (empty? args) :nullary
+                             (prog/index-key (vars/resolve-term (first args) ve)))
+        rules            (prog/candidate-rules functor goal-key program)
         new-stack        (into [{:goal goal :rule nil}] call-stack)]
     (if (and (empty? rules) (prog/abducible? functor program))
       ;; Abducible with no rules: succeed, recording goal as assumed true

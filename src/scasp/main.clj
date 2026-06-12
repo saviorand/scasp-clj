@@ -58,7 +58,7 @@
                     rules)
          p1 (prog/set-query query p0)
          p2 (reduce prog/mark-abducible p1 abducibles)]
-     (-> p2 duals/compile-duals (nmr/generate-nmr-check opts)))))
+     (-> p2 duals/compile-duals (nmr/generate-nmr-check opts) prog/build-rule-index))))
 
 (defn solve
   "Solve a query against a set of rules.
