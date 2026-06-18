@@ -19,64 +19,55 @@
 
 ;;; ── Goal negation ────────────────────────────────────────────────────────────
 
+(def ^:private effect-builtin-ops
+  #{:print :println :nl :read_line :read_number
+    :string_concat :string_length :atom_string
+    :write_file :read_file :append_file :file_exists
+    :now_hour :now_minute :now_second :now_timestamp :now_date
+    :env_var :random_int :format_number :clj_call})
+
 (defn dual-goal
   "Negate a single goal for use in a dual clause body."
   [g]
   (cond
     (term/is-sneg? g)
-    ;; not(-p(X)) → p(X) (strong neg negated = positive)
     (first (:args g))
 
     (term/is-naf? g)
-    ;; not(not(X)) → X
     (first (:args g))
 
     (term/is-compound? g)
-    (let [op (:op g) args (:args g)]
-      (case op
-        :=        (assoc g :op :ne)
-        :ne       (assoc g :op :=)
-        :=:=      (assoc g :op :arith-ne)
-        :arith-ne (assoc g :op :=:=)
-        :<        (assoc g :op :>=)
-        :>        (assoc g :op :=<)
-        :=<       (assoc g :op :>)
-        :>=       (assoc g :op :<)
-        :term<    (assoc g :op :term>=)
-        :term>    (assoc g :op :term<=)
-        :term<=   (assoc g :op :term>)
-        :term>=   (assoc g :op :term<)
-        ;; CLP(R) symbolic operators
-        :clp<     (assoc g :op :clp>=)
-        :clp>     (assoc g :op :clp=<)
-        :clp=<    (assoc g :op :clp>)
-        :clp>=    (assoc g :op :clp<)
-        :clp=     (assoc g :op :clp<>)
-        :clp<>    (assoc g :op :clp=)
-        ;; CLP(R) #-prefixed aliases
-        :hash<    (assoc g :op :hash>=)
-        :hash>    (assoc g :op :hash=<)
-        :hash=<   (assoc g :op :hash>)
-        :hash>=   (assoc g :op :hash<)
-        :hash=    (assoc g :op :hash<>)
-        :hash<>   (assoc g :op :hash=)
-        ;; Negation of arithmetic is/2 wraps in not
-        :is       {:op :not :args [g]}
-        ;; Effect builtins: wrap in NAF (no dual rules exist)
-        :print      {:op :not :args [g]}
-        :println    {:op :not :args [g]}
-        :nl         {:op :not :args [g]}
-        :read_line  {:op :not :args [g]}
-        :read_number {:op :not :args [g]}
-        :string_concat {:op :not :args [g]}
-        :string_length {:op :not :args [g]}
-        :atom_string {:op :not :args [g]}
-        :write_file {:op :not :args [g]}
-        :read_file  {:op :not :args [g]}
-        :append_file {:op :not :args [g]}
-        :file_exists {:op :not :args [g]}
-        ;; Regular predicate: wrap in not
-        (assoc g :op (keyword (str "not_" (name op))))))
+    (let [op (:op g)]
+      (cond
+        (contains? effect-builtin-ops op) {:op :not :args [g]}
+        :else
+        (case op
+          :=        (assoc g :op :ne)
+          :ne       (assoc g :op :=)
+          :=:=      (assoc g :op :arith-ne)
+          :arith-ne (assoc g :op :=:=)
+          :<        (assoc g :op :>=)
+          :>        (assoc g :op :=<)
+          :=<       (assoc g :op :>)
+          :>=       (assoc g :op :<)
+          :term<    (assoc g :op :term>=)
+          :term>    (assoc g :op :term<=)
+          :term<=   (assoc g :op :term>)
+          :term>=   (assoc g :op :term<)
+          :clp<     (assoc g :op :clp>=)
+          :clp>     (assoc g :op :clp=<)
+          :clp=<    (assoc g :op :clp>)
+          :clp>=    (assoc g :op :clp<)
+          :clp=     (assoc g :op :clp<>)
+          :clp<>    (assoc g :op :clp=)
+          :hash<    (assoc g :op :hash>=)
+          :hash>    (assoc g :op :hash=<)
+          :hash=<   (assoc g :op :hash>)
+          :hash>=   (assoc g :op :hash<)
+          :hash=    (assoc g :op :hash<>)
+          :hash<>   (assoc g :op :hash=)
+          :is       {:op :not :args [g]}
+          (assoc g :op (keyword (str "not_" (name op)))))))
 
     :else {:op :not :args [g]}))
 

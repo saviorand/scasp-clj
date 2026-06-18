@@ -1,8 +1,8 @@
-# Hello World — effects meet logic
+# Hello World — effects + logic + real clock
 #
-# Shows that rules can have side effects (IO),
-# and logic still works: the same rules that print
-# can also be queried for justification.
+# Combines IO, Java interop (real system time),
+# and logic. The same greeting rules can be queried
+# with why/whynot for explanations.
 
 greeting(morning, "Good morning").
 greeting(afternoon, "Good afternoon").
@@ -13,7 +13,8 @@ time_of_day(Hour, afternoon) <- Hour >= 12, Hour < 17.
 time_of_day(Hour, evening)   <- Hour >= 17, Hour < 24.
 time_of_day(Hour, evening)   <- Hour >= 0, Hour < 5.
 
-greet(Name, Hour) <-
+greet(Name) <-
+    now_hour(Hour),
     time_of_day(Hour, Period),
     greeting(Period, Msg),
     print(Msg),
@@ -21,11 +22,9 @@ greet(Name, Hour) <-
     print(Name),
     println("!").
 
-# Greet Alice at 9am
-?- greet(alice, 9).
+# Greet using the actual system clock
+?- greet(alice).
+?- why greet(alice).
 
-# Greet Bob at 20:00
-?- greet(bob, 20).
-
-# Why does this greeting work?
-?- why greet(alice, 9).
+# What hours would give a morning greeting?
+?- solve time_of_day(H, morning).

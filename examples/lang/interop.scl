@@ -1,0 +1,31 @@
+# Clojure/JVM interop — call any Clojure function from rules
+#
+# clj_call(Namespace, Function, ...Args, Result)
+# calls (namespace/function ...args) and binds Result.
+
+# Call clojure.string/upper-case
+shout(Text, Result) <-
+    clj_call("clojure.string", "upper-case", Text, Result).
+
+# Call clojure.string/reverse
+mirror(Text, Result) <-
+    clj_call("clojure.string", "reverse", Text, Result).
+
+# Compose: shout then reverse
+shout_mirror(Text, Result) <-
+    shout(Text, Shouted),
+    mirror(Shouted, Result).
+
+# Real clock
+current_time(H, M, S) <- now_hour(H), now_minute(M), now_second(S).
+
+show_time <-
+    current_time(H, M, S),
+    print(H), print(":"), print(M), print(":"), println(S).
+
+# Run demos
+?- shout("hello world", X).
+?- mirror("abcdef", X).
+?- shout_mirror("hello", X).
+?- show_time.
+?- why show_time.

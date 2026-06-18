@@ -168,7 +168,10 @@
     "findall/3" "!/0" "_false/0" "_nmr_check/0"
     "print/1" "println/1" "nl/0" "read_line/1" "read_number/1"
     "string_concat/3" "string_length/2" "atom_string/2"
-    "write_file/2" "read_file/2" "append_file/2" "file_exists/1"})
+    "write_file/2" "read_file/2" "append_file/2" "file_exists/1"
+    "now_hour/1" "now_minute/1" "now_second/1" "now_timestamp/1" "now_date/1"
+    "env_var/2" "random_int/2" "format_number/3" "clj_call/3" "clj_call/4"
+    "clj_call/5" "clj_call/6"})
 
 (defn scasp-builtin?
   "True if functor is a built-in that should not have duals generated."

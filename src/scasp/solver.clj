@@ -409,7 +409,10 @@
 (def ^:private effect-ops
   #{:print :println :nl :read_line :read_number
     :string_concat :string_length :atom_string
-    :write_file :read_file :append_file :file_exists})
+    :write_file :read_file :append_file :file_exists
+    :now_hour :now_minute :now_second :now_timestamp :now_date
+    :env_var :random_int :format_number
+    :clj_call})
 
 (defn- effect-term-str
   "Convert a resolved term to a printable string for effect output."
@@ -506,6 +509,82 @@
       (if (.exists (java.io.File. (effect-term-str (first args) ve)))
         [(mk-result ve chs :success [])]
         [])
+
+      :now_hour
+      (let [h (.getHour (java.time.LocalTime/now))]
+        (when-let [ve' (unify/solve-unify (first args) (long h) ve false)]
+          [(mk-result ve' chs :success [])]))
+
+      :now_minute
+      (let [m (.getMinute (java.time.LocalTime/now))]
+        (when-let [ve' (unify/solve-unify (first args) (long m) ve false)]
+          [(mk-result ve' chs :success [])]))
+
+      :now_second
+      (let [s (.getSecond (java.time.LocalTime/now))]
+        (when-let [ve' (unify/solve-unify (first args) (long s) ve false)]
+          [(mk-result ve' chs :success [])]))
+
+      :now_timestamp
+      (let [t (System/currentTimeMillis)]
+        (when-let [ve' (unify/solve-unify (first args) t ve false)]
+          [(mk-result ve' chs :success [])]))
+
+      :now_date
+      (let [d   (java.time.LocalDate/now)
+            y   (long (.getYear d))
+            m   (long (.getMonthValue d))
+            day (long (.getDayOfMonth d))
+            result {:op :date :args [y m day]}]
+        (when-let [ve' (unify/solve-unify (first args) result ve false)]
+          [(mk-result ve' chs :success [])]))
+
+      :env_var
+      (let [name-str (effect-term-str (first args) ve)]
+        (if-let [val (System/getenv name-str)]
+          (when-let [ve' (unify/solve-unify (second args) (term/string-val val) ve false)]
+            [(mk-result ve' chs :success [])])
+          []))
+
+      :random_int
+      (let [max-val (vars/fill-in (first args) ve)]
+        (when (number? max-val)
+          (let [n (long (rand-int (int max-val)))]
+            (when-let [ve' (unify/solve-unify (second args) n ve false)]
+              [(mk-result ve' chs :success [])]))))
+
+      :format_number
+      (let [[num-arg fmt-arg result-arg] args
+            n   (vars/fill-in num-arg ve)
+            fmt (effect-term-str fmt-arg ve)]
+        (when (number? n)
+          (let [s (term/string-val (String/format fmt (into-array Object [(if (integer? n) (Long/valueOf (long n)) (Double/valueOf (double n)))])))]
+            (when-let [ve' (unify/solve-unify result-arg s ve false)]
+              [(mk-result ve' chs :success [])]))))
+
+      :clj_call
+      (try
+        (let [[ns-arg fn-arg & rest-args] args
+              ns-str  (effect-term-str ns-arg ve)
+              fn-str  (effect-term-str fn-arg ve)
+              fn-args (mapv #(let [v (vars/fill-in % ve)]
+                               (cond
+                                 (term/is-string-val? v) (term/string-val-str v)
+                                 (keyword? v) (name v)
+                                 :else v))
+                            (butlast rest-args))
+              result-var (last rest-args)
+              the-fn  (requiring-resolve (symbol ns-str fn-str))
+              result  (apply the-fn fn-args)]
+          (let [term-result (cond
+                              (string? result)  (term/string-val result)
+                              (keyword? result) result
+                              (number? result)  result
+                              (nil? result)     :nil
+                              :else             (term/string-val (str result)))]
+            (when-let [ve' (unify/solve-unify result-var term-result ve false)]
+              [(mk-result ve' chs :success [])])))
+        (catch Exception _ []))
 
       (throw (ex-info (str "Unknown effect: " op) {:goal goal})))))
 
