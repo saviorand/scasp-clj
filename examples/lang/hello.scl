@@ -1,0 +1,31 @@
+# Hello World — effects meet logic
+#
+# Shows that rules can have side effects (IO),
+# and logic still works: the same rules that print
+# can also be queried for justification.
+
+greeting(morning, "Good morning").
+greeting(afternoon, "Good afternoon").
+greeting(evening, "Good evening").
+
+time_of_day(Hour, morning)   <- Hour >= 5, Hour < 12.
+time_of_day(Hour, afternoon) <- Hour >= 12, Hour < 17.
+time_of_day(Hour, evening)   <- Hour >= 17, Hour < 24.
+time_of_day(Hour, evening)   <- Hour >= 0, Hour < 5.
+
+greet(Name, Hour) <-
+    time_of_day(Hour, Period),
+    greeting(Period, Msg),
+    print(Msg),
+    print(", "),
+    print(Name),
+    println("!").
+
+# Greet Alice at 9am
+?- greet(alice, 9).
+
+# Greet Bob at 20:00
+?- greet(bob, 20).
+
+# Why does this greeting work?
+?- why greet(alice, 9).

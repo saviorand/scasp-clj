@@ -21,6 +21,21 @@
 (defn is-atom? [t] (keyword? t))
 (defn is-number? [t] (number? t))
 
+(defn is-string-val?
+  "True if t is a string literal value (not a variable)."
+  [t]
+  (and (map? t) (contains? t :scasp/string)))
+
+(defn string-val
+  "Create a string literal value."
+  [s]
+  {:scasp/string s})
+
+(defn string-val-str
+  "Extract the raw string from a string literal value."
+  [t]
+  (:scasp/string t))
+
 (defn is-compound?
   "A term is compound iff it is a map with :op and :args."
   [t]
@@ -115,9 +130,10 @@
   "Collect all variable strings appearing in t as a set."
   [t]
   (cond
-    (is-var? t)      #{t}
-    (is-compound? t) (transduce (map term-vars) set/union #{} (:args t))
-    :else            #{}))
+    (is-var? t)        #{t}
+    (is-string-val? t) #{}
+    (is-compound? t)   (transduce (map term-vars) set/union #{} (:args t))
+    :else              #{}))
 
 (defn terms-vars
   "Collect all variables from a list of terms."
@@ -128,9 +144,10 @@
   "Return a list (with duplicates) of all variable strings in t, in order."
   [t]
   (cond
-    (is-var? t)      [t]
-    (is-compound? t) (mapcat term-vars-list (:args t))
-    :else            []))
+    (is-var? t)        [t]
+    (is-string-val? t) []
+    (is-compound? t)   (mapcat term-vars-list (:args t))
+    :else              []))
 
 ;;; ── Structural substitution ──────────────────────────────────────────────────
 
@@ -138,9 +155,10 @@
   "Structurally replace every occurrence of var-name with value in term t."
   [var-name value t]
   (cond
-    (= t var-name)   value
-    (is-compound? t) (update t :args (fn [args] (mapv #(substitute var-name value %) args)))
-    :else            t))
+    (= t var-name)     value
+    (is-string-val? t) t
+    (is-compound? t)   (update t :args (fn [args] (mapv #(substitute var-name value %) args)))
+    :else              t))
 
 ;;; ── Operator / expression predicates ────────────────────────────────────────
 
@@ -251,10 +269,11 @@
   "Return a human-readable string for a term (no var-env lookup)."
   [t]
   (cond
-    (is-var? t)      t
-    (is-atom? t)     (name t)
-    (is-number? t)   (str t)
-    (is-sneg? t)     (str "-" (pp-term (first (:args t))))
+    (is-var? t)        t
+    (is-atom? t)       (name t)
+    (is-number? t)     (str t)
+    (is-string-val? t) (str "\"" (string-val-str t) "\"")
+    (is-sneg? t)       (str "-" (pp-term (first (:args t))))
     (is-naf? t)      (str "not " (pp-term (first (:args t))))
     (is-forall? t)   (str "forall(" (pp-term (first (:args t))) ", " (pp-term (second (:args t))) ")")
     (is-compound? t) (str (name (:op t)) (pp-args (:args t)))

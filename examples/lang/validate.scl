@@ -1,0 +1,38 @@
+# Input validation — logic-driven user interaction
+#
+# Combines IO (reading user input) with constraint logic.
+# The SAME eligibility rules can be:
+#   - applied to concrete input (check_age)
+#   - queried symbolically (what ages work?)
+#   - explained (why/whynot)
+
+# Pure logic — no IO, fully queryable
+eligible(Age) <- Age >= 18, Age < 65.
+senior(Age)   <- Age >= 65.
+minor(Age)    <- Age < 18.
+
+category(Age, eligible) <- eligible(Age).
+category(Age, senior)   <- senior(Age).
+category(Age, minor)    <- minor(Age).
+
+# IO layer — uses the pure rules
+check(Age) <-
+    category(Age, Cat),
+    print("Age "),
+    print(Age),
+    print(" -> "),
+    println(Cat).
+
+# Check specific ages
+?- check(25).
+?- check(10).
+?- check(70).
+
+# What range of ages is eligible? (symbolic answer)
+?- solve eligible(Age).
+
+# Why is 10 not eligible?
+?- whynot eligible(10).
+
+# Why is 25 eligible?
+?- why eligible(25).

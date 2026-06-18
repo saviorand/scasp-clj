@@ -165,7 +165,10 @@
 
 (def ^:private scasp-builtins
   #{"true/0" "false/0" "fail/0" "call/1" "call/2" "call/3" "call/4"
-    "findall/3" "!/0" "_false/0" "_nmr_check/0"})
+    "findall/3" "!/0" "_false/0" "_nmr_check/0"
+    "print/1" "println/1" "nl/0" "read_line/1" "read_number/1"
+    "string_concat/3" "string_length/2" "atom_string/2"
+    "write_file/2" "read_file/2" "append_file/2" "file_exists/1"})
 
 (defn scasp-builtin?
   "True if functor is a built-in that should not have duals generated."

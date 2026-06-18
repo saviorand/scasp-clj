@@ -62,6 +62,19 @@
         :hash<>   (assoc g :op :hash=)
         ;; Negation of arithmetic is/2 wraps in not
         :is       {:op :not :args [g]}
+        ;; Effect builtins: wrap in NAF (no dual rules exist)
+        :print      {:op :not :args [g]}
+        :println    {:op :not :args [g]}
+        :nl         {:op :not :args [g]}
+        :read_line  {:op :not :args [g]}
+        :read_number {:op :not :args [g]}
+        :string_concat {:op :not :args [g]}
+        :string_length {:op :not :args [g]}
+        :atom_string {:op :not :args [g]}
+        :write_file {:op :not :args [g]}
+        :read_file  {:op :not :args [g]}
+        :append_file {:op :not :args [g]}
+        :file_exists {:op :not :args [g]}
         ;; Regular predicate: wrap in not
         (assoc g :op (keyword (str "not_" (name op))))))
 

@@ -57,6 +57,28 @@
   (when (< (inc i) (.length s))
     (str (.charAt s i) (.charAt s (inc i)))))
 
+(defn- read-string-lit [^String s ^long i]
+  (let [sb (StringBuilder.)]
+    (loop [i (inc i)]
+      (when (>= i (.length s))
+        (throw (ex-info "Unterminated string literal" {:pos i})))
+      (let [c (.charAt s i)]
+        (cond
+          (= c \") [(.toString sb) (inc i)]
+          (= c \\)
+          (if (< (inc i) (.length s))
+            (let [nc (.charAt s (inc i))]
+              (case nc
+                \n (.append sb \newline)
+                \t (.append sb \tab)
+                \" (.append sb \")
+                \\ (.append sb \\)
+                (.append sb nc))
+              (recur (+ i 2)))
+            (throw (ex-info "Unterminated escape in string" {:pos i})))
+          :else
+          (do (.append sb c) (recur (inc i))))))))
+
 (defn tokenize [^String input]
   (let [len (.length input)]
     (loop [i 0 tokens []]
@@ -72,6 +94,10 @@
               (= p2 ">=") (recur (+ i 2) (conj tokens {:type :op :value :>=}))
               (= p2 "==") (recur (+ i 2) (conj tokens {:type :op :value :=:=}))
               (= p2 "!=") (recur (+ i 2) (conj tokens {:type :op :value :arith-ne}))
+
+              (= c \")
+              (let [[s next-i] (read-string-lit input i)]
+                (recur next-i (conj tokens {:type :string :value s})))
 
               (or (letter? c) (= c \_))
               (let [[id next-i] (read-ident input i)]
@@ -171,6 +197,9 @@
 
       :number
       (do (next-tok! p) (:value tok))
+
+      :string
+      (do (next-tok! p) {:scasp/string (:value tok)})
 
       :true
       (do (next-tok! p) {:op :true :args []})

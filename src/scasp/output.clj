@@ -50,6 +50,9 @@
     (number? t)
     (str t)
 
+    (term/is-string-val? t)
+    (str "\"" (term/string-val-str t) "\"")
+
     (term/is-naf? t)
     (str "not " (fmt-term (first (:args t)) ve))
 

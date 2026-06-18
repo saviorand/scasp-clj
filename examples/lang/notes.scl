@@ -1,0 +1,49 @@
+# Notes — a tiny file-based app with logic + IO
+#
+# Demonstrates that s(CASP) Lang can do real software:
+# file I/O, string manipulation, and logic-driven behavior.
+
+# Save a note to a file
+save_note(Tag, Text) <-
+    string_concat(Tag, ".txt", Filename),
+    write_file(Filename, Text),
+    print("Saved: "),
+    println(Tag).
+
+# Load a note from a file
+load_note(Tag, Text) <-
+    string_concat(Tag, ".txt", Filename),
+    file_exists(Filename),
+    read_file(Filename, Text).
+
+# Display a note
+show_note(Tag) <-
+    load_note(Tag, Text),
+    print("["),
+    print(Tag),
+    print("] "),
+    println(Text).
+
+# Summarize a note
+summarize(Tag) <-
+    load_note(Tag, Text),
+    string_length(Text, Len),
+    print(Tag),
+    print(": "),
+    print(Len),
+    println(" chars").
+
+# Write some notes
+?- save_note(todo, "Buy groceries and fix the bike").
+?- save_note(idea, "Rule-based language with effects").
+?- save_note(bug, "Off-by-one in the parser").
+
+# Read them back
+?- show_note(todo).
+?- show_note(idea).
+?- show_note(bug).
+
+# Show their lengths
+?- summarize(todo).
+?- summarize(idea).
+?- summarize(bug).

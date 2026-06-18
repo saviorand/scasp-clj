@@ -35,7 +35,7 @@
    Otherwise nil."
   [t ve]
   (cond
-    (or (term/is-atom? t) (term/is-number? t)) t
+    (or (term/is-atom? t) (term/is-number? t) (term/is-string-val? t)) t
     (term/is-var? t)
     (let [v (vars/var-value t ve)]
       (when (contains? v :val)

@@ -404,6 +404,111 @@
     (when-let [ve' (unify/solve-unify list-arg list-term ve false)]
       [(mk-result ve' chs {:findall template} [])])))
 
+;;; ── Effect builtins ──────────────────────────────────────────────────────────
+
+(def ^:private effect-ops
+  #{:print :println :nl :read_line :read_number
+    :string_concat :string_length :atom_string
+    :write_file :read_file :append_file :file_exists})
+
+(defn- effect-term-str
+  "Convert a resolved term to a printable string for effect output."
+  [t ve]
+  (let [t' (vars/fill-in t ve)]
+    (cond
+      (term/is-string-val? t') (term/string-val-str t')
+      (keyword? t')            (name t')
+      (number? t')             (str t')
+      (string? t')             t'
+      (term/is-compound? t')   (term/pp-term t')
+      :else                    (str t'))))
+
+(defn- solve-effect
+  "Execute an effect goal. Returns seq of result maps (empty = failure)."
+  [goal ve chs]
+  (let [op   (:op goal)
+        args (:args goal)]
+    (case op
+      :print
+      (do (print (effect-term-str (first args) ve))
+          (flush)
+          [(mk-result ve chs :success [])])
+
+      :println
+      (do (println (effect-term-str (first args) ve))
+          [(mk-result ve chs :success [])])
+
+      :nl
+      (do (println)
+          [(mk-result ve chs :success [])])
+
+      :read_line
+      (if-let [line (read-line)]
+        (when-let [ve' (unify/solve-unify (first args) (term/string-val line) ve false)]
+          [(mk-result ve' chs :success [])])
+        [])
+
+      :read_number
+      (try
+        (let [line (clojure.string/trim (or (read-line) ""))
+              n    (if (clojure.string/includes? line ".")
+                     (Double/parseDouble line)
+                     (Long/parseLong line))]
+          (when-let [ve' (unify/solve-unify (first args) n ve false)]
+            [(mk-result ve' chs :success [])]))
+        (catch Exception _ []))
+
+      :string_concat
+      (let [[a b c] args
+            sa     (effect-term-str a ve)
+            sb     (effect-term-str b ve)
+            result (term/string-val (str sa sb))]
+        (when-let [ve' (unify/solve-unify c result ve false)]
+          [(mk-result ve' chs :success [])]))
+
+      :string_length
+      (let [s (effect-term-str (first args) ve)
+            n (long (count s))]
+        (when-let [ve' (unify/solve-unify (second args) n ve false)]
+          [(mk-result ve' chs :success [])]))
+
+      :atom_string
+      (let [[a s] args
+            av (vars/fill-in a ve)
+            sv (vars/fill-in s ve)]
+        (cond
+          (keyword? av)
+          (when-let [ve' (unify/solve-unify s (term/string-val (name av)) ve false)]
+            [(mk-result ve' chs :success [])])
+          (term/is-string-val? sv)
+          (when-let [ve' (unify/solve-unify a (keyword (term/string-val-str sv)) ve false)]
+            [(mk-result ve' chs :success [])])
+          :else []))
+
+      :write_file
+      (let [[path content] args]
+        (spit (effect-term-str path ve) (effect-term-str content ve))
+        [(mk-result ve chs :success [])])
+
+      :read_file
+      (try
+        (let [content (slurp (effect-term-str (first args) ve))]
+          (when-let [ve' (unify/solve-unify (second args) (term/string-val content) ve false)]
+            [(mk-result ve' chs :success [])]))
+        (catch Exception _ []))
+
+      :append_file
+      (let [[path content] args]
+        (spit (effect-term-str path ve) (effect-term-str content ve) :append true)
+        [(mk-result ve chs :success [])])
+
+      :file_exists
+      (if (.exists (java.io.File. (effect-term-str (first args) ve)))
+        [(mk-result ve chs :success [])]
+        [])
+
+      (throw (ex-info (str "Unknown effect: " op) {:goal goal})))))
+
 ;;; ── Goal dispatcher ──────────────────────────────────────────────────────────
 
 (defn solve-goal
@@ -441,6 +546,20 @@
          (or (= (:op goal) :false) (= (:op goal) :fail))
          (empty? (:args goal)))
     []
+
+    ;; Effect builtins (IO, string ops, file ops)
+    (and (term/is-compound? goal) (contains? effect-ops (:op goal)))
+    (or (solve-effect goal ve chs) [])
+
+    ;; NAF over effect builtins: try the effect, negate the result
+    (and (term/is-naf? goal)
+         (let [inner (first (:args goal))]
+           (and (term/is-compound? inner) (contains? effect-ops (:op inner)))))
+    (let [inner  (first (:args goal))
+          results (solve-effect inner ve chs)]
+      (if (seq results)
+        []
+        [(mk-result ve chs :success [])]))
 
     ;; Arithmetic / comparison expression
     (term/is-expr? goal)
