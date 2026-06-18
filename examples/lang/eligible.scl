@@ -1,0 +1,18 @@
+# Age eligibility — CLP(R) numeric constraints
+#
+# Demonstrates that queries work "in reverse":
+# not just checking a specific age, but finding
+# the RANGE of valid ages symbolically.
+
+eligible(Age) <- Age >= 18, Age < 65.
+senior(Age) <- Age >= 65.
+minor(Age) <- Age < 18.
+
+# Is age 25 eligible?
+?- eligible(25).
+
+# Why isn't age 10 eligible?
+?- whynot eligible(10).
+
+# What ages are eligible? (symbolic constraint answer)
+?- solve eligible(Age).

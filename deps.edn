@@ -8,4 +8,6 @@
          :exec-fn cognitect.test-runner.api/test
          :exec-args {:dirs ["test"]}}
   :run {:main-opts ["-m" "scasp.main"]}
+  :lang {:extra-paths ["examples"]
+         :main-opts ["-m" "scasp.lang.repl"]}
   :examples {:extra-paths ["examples"]}}}

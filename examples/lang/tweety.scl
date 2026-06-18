@@ -1,0 +1,24 @@
+# Tweety — classic default reasoning with exceptions
+#
+# Birds fly by default, unless they're abnormal.
+# Penguins are abnormal (they don't fly).
+
+bird(tweety).
+bird(opus).
+penguin(sam).
+
+bird(X) <- penguin(X).
+flies(X) <- bird(X), not ab(X).
+ab(X) <- penguin(X).
+
+# Forward: who flies?
+?- flies(X).
+
+# Why does tweety fly?
+?- why flies(tweety).
+
+# Why doesn't sam fly?
+?- whynot flies(sam).
+
+# Enumerate all flyers with models
+?- solve flies(X).

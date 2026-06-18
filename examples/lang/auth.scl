@@ -1,0 +1,33 @@
+# Authorization policy — who can access what, and why (not)
+#
+# Demonstrates multi-directional querying on a realistic domain.
+
+role(alice, admin).
+role(bob, developer).
+role(carol, developer).
+
+resource(prod, sensitive).
+resource(staging, normal).
+resource(logs, normal).
+
+# Admins can access everything
+can_access(User, Res) <- role(User, admin).
+
+# Developers can access non-sensitive resources
+can_access(User, Res) <- role(User, developer),
+                         resource(Res, normal),
+                         not suspended(User).
+
+suspended(carol).
+
+# What can bob access?
+?- solve can_access(bob, X).
+
+# Why can alice access prod?
+?- why can_access(alice, prod).
+
+# Why can't bob access prod?
+?- whynot can_access(bob, prod).
+
+# Why can't carol access staging?
+?- whynot can_access(carol, staging).
